@@ -29,6 +29,7 @@ from .cmd_kline import kline
 from .cmd_monitor import market_stat, unusual
 from .cmd_offline import offline
 from .cmd_pfactor import pfactor
+from .cmd_plan import plan
 from .cmd_quote import quote, quote_list
 from .cmd_run_all import run_all
 from .cmd_tick import tick
@@ -91,6 +92,7 @@ cli.add_command(offline)
 cli.add_command(chanlun)
 cli.add_command(factor)
 cli.add_command(pfactor)
+cli.add_command(plan)
 cli.add_command(backtest)
 cli.add_command(portfolio)
 cli.add_command(run_all)
