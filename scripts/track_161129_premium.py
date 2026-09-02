@@ -39,11 +39,12 @@ import os
 import subprocess
 import sys
 import time
-import urllib.request
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+
+from easy_tdx.notify import notify
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import backtest_161129_premium as bt  # noqa: E402  — 复用取数/策略/引擎配置
@@ -100,50 +101,6 @@ def current_position(trades: pd.DataFrame) -> int:
     if not len(trades):
         return 0
     return int((trades["direction"] == "BUY").sum() - (trades["direction"] == "SELL").sum())
-
-
-# ── 通知（钉钉 webhook 优先，未配置退回 macOS 通知） ─────────────────────────
-
-
-_WEBHOOK_CONF = Path.home() / ".easy_tdx" / "custom_webhook_urls"
-
-
-def _webhook_urls() -> list[str]:
-    """webhook 地址列表：环境变量 CUSTOM_WEBHOOK_URLS（逗号分隔）优先，
-    其次 ~/.easy_tdx/custom_webhook_urls 配置文件（每行一个，# 开头为注释）。
-    cron 环境不继承 shell 环境变量，配置文件保证定时任务可用。"""
-    urls = [u.strip() for u in os.environ.get("CUSTOM_WEBHOOK_URLS", "").split(",") if u.strip()]
-    if not urls and _WEBHOOK_CONF.exists():
-        urls = [u.strip() for u in _WEBHOOK_CONF.read_text(encoding="utf-8").splitlines()
-                if u.strip() and not u.startswith("#")]
-    return urls
-
-
-def notify(title: str, text: str) -> None:
-    """发送通知：钉钉机器人 webhook（text 消息）优先，未配置退回 macOS 桌面通知。"""
-    print(f"[通知] {title}: {text}")
-    urls = _webhook_urls()
-    if urls:
-        payload = json.dumps({"msgtype": "text", "text": {"content": f"{title}\n{text}"}}).encode()
-        for url in urls:
-            try:
-                req = urllib.request.Request(
-                    url, data=payload, headers={"Content-Type": "application/json"}
-                )
-                with urllib.request.urlopen(req, timeout=10) as resp:
-                    body = json.loads(resp.read().decode("utf-8", "ignore"))
-                    if body.get("errcode") != 0:
-                        print(f"[钉钉发送失败] errcode={body.get('errcode')} errmsg={body.get('errmsg')}")
-            except Exception as e:
-                print(f"[钉钉发送失败] {e}")
-    else:
-        try:
-            subprocess.run(
-                ["osascript", "-e", f'display notification "{text}" with title "{title}"'],
-                check=True, timeout=10, capture_output=True,
-            )
-        except Exception:
-            pass
 
 
 # ── 图表（单文件 HTML + ECharts，与 web-ui 同技术栈） ─────────────────────────
