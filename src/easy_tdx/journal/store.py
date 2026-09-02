@@ -9,10 +9,13 @@ SQLite 库默认 ``~/.easy_tdx/decisions.db``（遵循 ``EASY_TDX_CONFIG_DIR``�
 from __future__ import annotations
 
 import json
-import os
 import sqlite3
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
+from typing import Generator
+
+from easy_tdx import config as _config
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS decisions (
@@ -33,17 +36,20 @@ def db_path(path: str | Path | None = None) -> Path:
     """decisions.db 路径（默认 ``<EASY_TDX_CONFIG_DIR|~/.easy_tdx>/decisions.db``）。"""
     if path is not None:
         return Path(path)
-    base = Path(os.environ.get("EASY_TDX_CONFIG_DIR", str(Path.home() / ".easy_tdx")))
-    return base / "decisions.db"
+    return _config.config_dir() / "decisions.db"
 
 
-def open_db(path: str | Path | None = None) -> sqlite3.Connection:
-    """打开决策库（自动建表）。调用方负责 close。"""
+@contextmanager
+def _db(path: str | Path | None = None) -> Generator[sqlite3.Connection, None, None]:
+    """打开决策库（自动建表）的上下文管理器。"""
     conn = sqlite3.connect(db_path(path))
     conn.row_factory = sqlite3.Row
     conn.execute(_SCHEMA)
     conn.commit()
-    return conn
+    try:
+        yield conn
+    finally:
+        conn.close()
 
 
 def add_decision(
@@ -60,12 +66,15 @@ def add_decision(
 
     Args:
         symbol: 标的（"SZ 002594"）。
-        plan: build_plan() 输出的完整计划 dict（含 features 时同时落 snapshot）。
-        snapshot: 特征快照 dict；None 时取 plan["features"]。
+        plan: build_plan() 输出的完整计划 dict。
+        snapshot: 特征快照 dict；None 时取 plan["features"]（保持向后兼容）。
+        source: 来源标识。
+        note: 备注。
+        date: 日期字符串，默认取 plan["date"] 或今天。
+        path: 自定义 decisions.db 路径。
     """
     features = snapshot if snapshot is not None else plan.get("features")
-    conn = open_db(path)
-    try:
+    with _db(path) as conn:
         cur = conn.execute(
             "INSERT INTO decisions "
             "(date, symbol, verdict, plan_json, snapshot_json, created_at, source, note) "
@@ -83,14 +92,11 @@ def add_decision(
         )
         conn.commit()
         return int(cur.lastrowid)
-    finally:
-        conn.close()
 
 
 def get_decision(decision_id: int, path: str | Path | None = None) -> dict | None:
     """按 id 读取一条决策记录（plan_json/snapshot_json 已反序列化）。"""
-    conn = open_db(path)
-    try:
+    with _db(path) as conn:
         row = conn.execute("SELECT * FROM decisions WHERE id = ?", (decision_id,)).fetchone()
         if row is None:
             return None
@@ -99,8 +105,6 @@ def get_decision(decision_id: int, path: str | Path | None = None) -> dict | Non
         if d["snapshot_json"]:
             d["snapshot_json"] = json.loads(d["snapshot_json"])
         return d
-    finally:
-        conn.close()
 
 
 def list_decisions(
@@ -109,8 +113,7 @@ def list_decisions(
     path: str | Path | None = None,
 ) -> list[dict]:
     """按时间倒序列出决策记录（不含大字段，仅摘要行）。"""
-    conn = open_db(path)
-    try:
+    with _db(path) as conn:
         if symbol:
             rows = conn.execute(
                 "SELECT id, date, symbol, verdict, source, note, created_at "
@@ -124,5 +127,3 @@ def list_decisions(
                 (limit,),
             ).fetchall()
         return [dict(r) for r in rows]
-    finally:
-        conn.close()

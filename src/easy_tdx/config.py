@@ -33,6 +33,14 @@ from zoneinfo import ZoneInfo
 _CONFIG_DIR = Path(os.environ.get("EASY_TDX_CONFIG_DIR", str(Path.home() / ".easy_tdx")))
 _CONFIG_FILE = _CONFIG_DIR / "config.json"
 
+
+def config_dir() -> Path:
+    """返回配置目录：``EASY_TDX_CONFIG_DIR`` 环境变量优先，默认 ``~/.easy_tdx``。
+
+    调用时读取环境变量（懒读取），测试可 monkeypatch。
+    """
+    return Path(os.environ.get("EASY_TDX_CONFIG_DIR", str(Path.home() / ".easy_tdx")))
+
 # 业务时间统一用上海时区（与 client.py 一致），避免 naive datetime 跨时区歧义（审计 #18）。
 _SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 

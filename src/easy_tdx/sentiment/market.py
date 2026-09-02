@@ -17,6 +17,8 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from easy_tdx.utils import round2 as _round2
+
 # ---- 评分阈值（P0-T1 硬编码常量，见 docs/trading_system_tasks.md）----
 TURNOVER_LOW = 8000e8  # 两市成交额（元）低于此视为流动性不足
 TURNOVER_HOT = 25000e8  # 高于此视为情绪过热
@@ -24,10 +26,6 @@ LIMIT_UP_ACTIVE = 100  # 涨停家数高于此视为赚钱效应强
 LIMIT_DOWN_PANIC = 10  # 跌停家数高于此视为恐慌
 BREADTH_BEARISH = 0.7  # 下跌家数占比高于此偏空
 BREADTH_BULLISH = 0.45  # 低于此偏多
-
-
-def _round2(x: float | None) -> float | None:
-    return None if x is None or not np.isfinite(x) else round(float(x), 2)
 
 
 # ---------------------------------------------------------------------------
@@ -72,23 +70,19 @@ def fetch_index_bars(client=None, count: int = 60) -> dict | None:
 
     try:
         if client is None:
-            c = MacClient.from_best_host()
-            c.connect()
-        else:
-            c = client
-        sh = c.get_stock_kline(1, "000001", period=Period.DAILY, start=0, count=count)
-        sz = c.get_stock_kline(0, "399107", period=Period.DAILY, start=0, count=count)
-        if sh.empty and sz.empty:
-            return None
-        return {"sh": sh, "sz": sz}
+            with MacClient.from_best_host() as c:
+                return _fetch_index_bars(c, count)
+        return _fetch_index_bars(client, count)
     except Exception:
         return None
-    finally:
-        if client is None and "c" in locals():
-            try:
-                c.close()
-            except Exception:
-                pass
+
+
+def _fetch_index_bars(c, count: int) -> dict:
+    sh = c.get_stock_kline(1, "000001", period=Period.DAILY, start=0, count=count)
+    sz = c.get_stock_kline(0, "399107", period=Period.DAILY, start=0, count=count)
+    if sh.empty and sz.empty:
+        return None
+    return {"sh": sh, "sz": sz}
 
 
 def fetch_board_ranking(
@@ -120,11 +114,10 @@ def fetch_board_ranking(
 
     try:
         if client is None:
-            c = MacClient.from_best_host()
-            c.connect()
+            with MacClient.from_best_host() as c:
+                df = c.get_board_ranking(board_type=bt, top_n=max(top_n, 15))
         else:
-            c = client
-        df = c.get_board_ranking(board_type=bt, top_n=max(top_n, 15))
+            df = client.get_board_ranking(board_type=bt, top_n=max(top_n, 15))
         return {
             "gainers": _top(df, "change_pct", False, top_n),
             "losers": _top(df, "change_pct", True, top_n),
@@ -133,12 +126,6 @@ def fetch_board_ranking(
         }
     except Exception:
         return None
-    finally:
-        if client is None and "c" in locals():
-            try:
-                c.close()
-            except Exception:
-                pass
 
 
 # ---------------------------------------------------------------------------
@@ -149,12 +136,15 @@ def fetch_board_ranking(
 def score_market(
     breadth: dict | None,
     index: dict | None = None,
+    *,
+    sh_ma20: float | None = None,
 ) -> dict:
     """市场风险分 + 情绪标签。
 
     Args:
         breadth: fetch_breadth() 结果（None=无数据，宽度部分计 0 分）。
         index: fetch_index_bars() 结果（None=无数据，指数趋势部分计 0 分）。
+        sh_ma20: 上证 MA20（已计算则传入，避免重复 rolling）。
 
     Returns:
         {score, label, factors: [{name, points, note}]}
@@ -239,7 +229,7 @@ def score_market(
         sh = index["sh"]
         if len(sh) >= 20:
             close = float(sh["close"].iloc[-1])
-            ma20 = float(sh["close"].rolling(20).mean().iloc[-1])
+            ma20 = float(sh_ma20) if sh_ma20 is not None and np.isfinite(sh_ma20) else float(sh["close"].rolling(20).mean().iloc[-1])
             if close < ma20:
                 factors.append(
                     {
@@ -277,17 +267,18 @@ def build_snapshot(
         index 项压缩为 {sh_close, sh_ma20, sh_change_pct, turnover_2m}。
     """
     index_compact: dict | None = None
+    sh_ma20: float | None = None
     if index and not index["sh"].empty:
         sh = index["sh"]
         close = float(sh["close"].iloc[-1])
         prev = float(sh["close"].iloc[-2]) if len(sh) >= 2 else close
-        ma20 = float(sh["close"].rolling(20).mean().iloc[-1]) if len(sh) >= 20 else None
+        sh_ma20 = float(sh["close"].rolling(20).mean().iloc[-1]) if len(sh) >= 20 else None
         index_compact = {
             "sh_close": _round2(close),
-            "sh_ma20": _round2(ma20),
+            "sh_ma20": _round2(sh_ma20),
             "sh_change_pct": round((close / prev - 1) * 100, 2),
         }
-    market_score = score_market(breadth, index)
+    market_score = score_market(breadth, index, sh_ma20=sh_ma20)
     if index_compact is not None:
         index_compact["turnover_2m"] = market_score.get("turnover_2m")
     return {

@@ -20,6 +20,7 @@ import numpy as np
 import pandas as pd
 
 from easy_tdx.ta import analyze_technical_state
+from easy_tdx.utils import round2 as _round2
 
 # ---- 风险评分权重与阈值 ----
 VOL_RISK_MAX = 15  # 波动（ATR%）风险上限
@@ -44,12 +45,18 @@ _ACTION_TEXT = {
 }
 
 
-def _round2(x: float | None) -> float | None:
-    return None if x is None or not np.isfinite(x) else round(float(x), 2)
-
-
 def _pct(a: float, b: float) -> float:
     return (b - a) / a * 100 if a > 0 else 0.0
+
+
+def _risk_label(score: float) -> str:
+    if score >= 75:
+        return "高风险"
+    if score >= 55:
+        return "中高风险"
+    if score >= 30:
+        return "中风险"
+    return "低风险"
 
 
 # ---------------------------------------------------------------------------
@@ -190,10 +197,9 @@ def compute_risk(
 
     score = round(volatility + technical_pts + sentiment + market, 1)
     score = min(score, 100.0)
-    label = "高" if score >= 75 else ("中高" if score >= 55 else ("中" if score >= 30 else "低"))
     return {
         "score": score,
-        "label": f"{label}风险",
+        "label": _risk_label(score),
         "components": {
             "volatility": volatility,
             "technical": technical_pts,
@@ -243,7 +249,7 @@ def compute_position(
         notes.append(f"高波动（ATR {atr_pct:.1f}%），仓位再 ×0.7")
 
     pct = min(pct, SINGLE_STOCK_CAP)
-    pct = round(pct * 100) / 2 * 2  # 取整到 2% 的倍数
+    pct = round(pct * 50) / 50  # 取整到 2% 的倍数
     return {"pct": max(pct, 0.0), "notes": notes}
 
 
@@ -315,10 +321,8 @@ def build_plan(
     if technical.get("error") or close is None:
         return {"symbol": symbol, "error": technical.get("error", "无日线数据")}
     ref = float(entry_ref) if entry_ref and np.isfinite(entry_ref) else float(close)
-    technical["entry_ref"] = _round2(ref)
     if entry_ref_is_realtime is None:
         entry_ref_is_realtime = bool(entry_ref is not None and entry_ref != close)
-    technical["ref_is_realtime"] = entry_ref_is_realtime
 
     risk = compute_risk(technical, public, market_score)
 
@@ -336,10 +340,9 @@ def build_plan(
     atr_stop = ref - STOP_ATR_MULT * atr if atr and np.isfinite(atr) else None
     if support_stop is not None and atr_stop is not None:
         stop = max(support_stop, atr_stop)  # 取先触发者（更高价）
-        stop_basis = "支撑破位" if stop == support_stop else "ATR"
     else:
         stop = support_stop if support_stop is not None else atr_stop
-        stop_basis = "支撑破位" if support_stop is not None else "ATR"
+    stop_basis = "支撑破位" if stop == support_stop else "ATR"
     stop_cond = (
         f"收盘价跌破 {stop:.2f} 元止损离场；盘中跌破 30 分钟不收回亦触发；"
         "若低开跳空跌破直接市价止损"
@@ -348,7 +351,7 @@ def build_plan(
     )
     stop_loss = {
         "price": _round2(stop),
-        "pct": round(-abs(_pct(ref, stop)) if stop else None, 2) if stop is not None else None,
+        "pct": round(-abs(_pct(ref, stop)), 2) if stop is not None else None,
         "condition": stop_cond,
         "basis": stop_basis,
     }
@@ -356,11 +359,11 @@ def build_plan(
     # ---- 止盈：最近阻力减半仓 → 第二阻力清仓 ----
     r1 = resistances[0] if resistances else None
     if len(resistances) >= 2:
-        r2 = resistances[1]
+        r2_price = resistances[1]["price"]
     elif r1 is not None:
-        r2 = {"price": r1["price"] + (r1["price"] - ref) * 1.5, "type": "扩展位", "strength": 0.0}
+        r2_price = r1["price"] + (r1["price"] - ref) * 1.5
     else:
-        r2 = None
+        r2_price = None
     take_profit: list[dict] = []
     if r1 is not None:
         take_profit.append(
@@ -376,16 +379,16 @@ def build_plan(
                 ),
             }
         )
-    if r2 is not None:
+    if r2_price is not None:
         take_profit.append(
             {
                 "tier": 2,
-                "price": _round2(r2["price"]),
-                "pct": round(_pct(ref, r2["price"]), 2) if r2["price"] is not None else None,
-                "type": r2["type"],
+                "price": _round2(r2_price),
+                "pct": round(_pct(ref, r2_price), 2),
+                "type": "扩展位",
                 "action": "清仓",
                 "condition": (
-                    f"到达 {r2['price']:.2f} 元清仓落袋；若市场情绪亢奋且放量突破，"
+                    f"到达 {r2_price:.2f} 元清仓落袋；若市场情绪亢奋且放量突破，"
                     "可留 1/3 仓改用移动止盈"
                 ),
             }
@@ -443,8 +446,8 @@ def build_plan(
         rr1 = round((r1["price"] - ref) / (ref - stop), 2)
     else:
         rr1 = None
-    if stop and r2:
-        rr2 = round((r2["price"] - ref) / (ref - stop), 2)
+    if stop and r2_price:
+        rr2 = round((r2_price - ref) / (ref - stop), 2)
     else:
         rr2 = None
     risk_reward = {"rr1": rr1, "rr2": rr2}
@@ -458,7 +461,7 @@ def build_plan(
 
     # ---- 人类可读摘要 ----
     summary_lines = [f"【交易计划】{symbol}{' ' + name if name else ''}"]
-    ref_src = '盘中实时' if technical.get('ref_is_realtime') else '最新收盘'
+    ref_src = '盘中实时' if entry_ref_is_realtime else '最新收盘'
     summary_lines.append(f"时间：{technical.get('date')}，参考价 {ref:.2f} 元（{ref_src}）")
     if market_score:
         summary_lines.append(
@@ -510,6 +513,7 @@ def build_plan(
         "symbol": symbol,
         "date": technical.get("date"),
         "entry_ref": _round2(ref),
+        "entry_ref_is_realtime": entry_ref_is_realtime,
         "technical": technical,
         "risk": risk,
         "verdict": verdict,

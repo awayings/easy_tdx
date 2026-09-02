@@ -21,6 +21,7 @@
 
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import sys
 from datetime import datetime
@@ -30,6 +31,7 @@ import click
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from easy_tdx import config as _config  # noqa: E402
 from easy_tdx import features as feature_lib  # noqa: E402
 from easy_tdx.notify import notify  # noqa: E402
 from easy_tdx.sentiment import (  # noqa: E402
@@ -39,23 +41,32 @@ from easy_tdx.sentiment import (  # noqa: E402
     fetch_index_bars,
 )
 
-
-def _cache_dir() -> Path:
-    return feature_lib.features_dir().parent / "cache"
+CACHE_DIR = _config.config_dir() / "cache"
 
 
-def _snapshot_path(dated: bool, date: str | None = None) -> Path:
-    if dated:
-        return _cache_dir() / f"sentiment_{date or datetime.now().strftime('%Y%m%d')}.json"
-    return _cache_dir() / "sentiment_latest.json"
+def dated_snapshot_path(date: str | None = None) -> Path:
+    return CACHE_DIR / f"sentiment_{date or datetime.now().strftime('%Y%m%d')}.json"
+
+
+def latest_snapshot_path() -> Path:
+    return CACHE_DIR / "sentiment_latest.json"
 
 
 def collect(date: str | None = None) -> dict:
-    """抓取全部情绪数据并组装快照（单项失败自动降级为 None）。"""
-    breadth = fetch_breadth()
-    index = fetch_index_bars(count=60)
-    board = fetch_board_ranking(board_type="HY", top_n=10)
-    features = feature_lib.snapshot()
+    """抓取全部情绪数据并组装快照（单项失败自动降级为 None）。
+
+    四路数据源相互独立（TDX 宽度 / MAC 指数 / MAC 板块 / 本地特征 CSV），
+    并发抓取避免串行延迟叠加（日报路径约 3 次网络往返）。
+    """
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+        breadth_f = pool.submit(fetch_breadth)
+        index_f = pool.submit(fetch_index_bars, count=60)
+        board_f = pool.submit(fetch_board_ranking, "HY", 10)
+        features_f = pool.submit(feature_lib.snapshot)
+        breadth = breadth_f.result()
+        index = index_f.result()
+        board = board_f.result()
+        features = features_f.result()
     return build_snapshot(breadth=breadth, index=index, board=board, features=features, date=date)
 
 
@@ -99,11 +110,10 @@ def main(report: bool, score_only: bool, target_date: str | None) -> None:
     if score_only:
         print(json.dumps(ms, ensure_ascii=False, indent=2))
         return
-    cache = _cache_dir()
-    cache.mkdir(parents=True, exist_ok=True)
-    for p in (_snapshot_path(dated=True, date=target_date), _snapshot_path(dated=False)):
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    for p in (dated_snapshot_path(target_date), latest_snapshot_path()):
         p.write_text(json.dumps(snap, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(f"[情绪快照] {_snapshot_path(dated=True, date=target_date)}", flush=True)
+    print(f"[情绪快照] {dated_snapshot_path(target_date)}", flush=True)
     print(json.dumps(ms, ensure_ascii=False), flush=True)
     if report:
         title = f"市场情绪日报·{ms['label']}"

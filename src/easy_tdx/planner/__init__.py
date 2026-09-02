@@ -20,6 +20,8 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from easy_tdx.cli.parsers import parse_market
+
 from .plan import build_plan
 
 __all__ = ["build_full_plan", "build_plan", "load_daily_df", "parse_symbol"]
@@ -43,9 +45,7 @@ def parse_symbol(symbol: str) -> tuple[str, str]:
 
 
 def _market_int(market: str) -> int:
-    from easy_tdx.models.enums import Market
-
-    return int(Market[market])
+    return int(parse_market(market))
 
 
 def load_daily_df(market: str, code: str) -> pd.DataFrame:
@@ -56,6 +56,7 @@ def load_daily_df(market: str, code: str) -> pd.DataFrame:
     """
     from easy_tdx.exceptions import TdxFileNotFoundError, TdxOfflineError
     from easy_tdx.offline.daily_bar import find_daily_bar_file, read_daily_bars
+    from easy_tdx.screen.scanner import _bars_to_df
 
     bars = []
     try:
@@ -65,34 +66,14 @@ def load_daily_df(market: str, code: str) -> pd.DataFrame:
         bars = []
 
     if len(bars) >= 30:
-        return pd.DataFrame(
-            [
-                {
-                    "datetime": pd.Timestamp(b.year, b.month, b.day),
-                    "open": b.open,
-                    "high": b.high,
-                    "low": b.low,
-                    "close": b.close,
-                    "vol": b.vol,
-                    "amount": b.amount,
-                }
-                for b in bars
-            ]
-        )
+        return _bars_to_df(bars)
 
     # fallback：TDX 协议日线（MAC，800 根）
     from easy_tdx.mac.client import MacClient
     from easy_tdx.mac.enums import Period
 
-    c = MacClient.from_best_host()
-    try:
-        c.connect()
+    with MacClient.from_best_host() as c:
         df = c.get_stock_kline(_market_int(market), code, period=Period.DAILY, count=800)
-    finally:
-        try:
-            c.close()
-        except Exception:
-            pass
     if df.empty:
         raise ValueError(f"无日线数据（本地 .day 缺失且协议拉取失败）: {market} {code}")
     return df
@@ -105,10 +86,9 @@ def fetch_realtime_quote(market: str, code: str) -> dict | None:
     """
     from easy_tdx.mac.client import MacClient
 
-    c = MacClient.from_best_host()
     try:
-        c.connect()
-        df = c.get_stock_quotes([(_market_int(market), code)])
+        with MacClient.from_best_host() as c:
+            df = c.get_stock_quotes([(_market_int(market), code)])
         if df.empty:
             return None
         row = df.iloc[0]
@@ -127,11 +107,6 @@ def fetch_realtime_quote(market: str, code: str) -> dict | None:
         }
     except Exception:
         return None
-    finally:
-        try:
-            c.close()
-        except Exception:
-            pass
 
 
 def build_full_plan(
@@ -142,6 +117,8 @@ def build_full_plan(
     with_public: bool = True,
     with_features: bool = True,
     market_score: dict | None = None,
+    hot_rank: list[dict] | None = None,
+    features: dict | None = None,
 ) -> dict:
     """端到端交易计划：日线 + 市场情绪 + 舆情 + 宏观特征 → 计划 dict。
 
@@ -152,6 +129,8 @@ def build_full_plan(
         with_public: False 时跳过舆情抓取（离线/测试用）。
         with_features: False 时跳过特征快照。
         market_score: 预取的市场评分（批量模式复用，避免每股重复请求）。
+        hot_rank: 已抓取的人气榜（批量模式复用，避免每股重复请求）。
+        features: 已抓取的特征快照（批量模式复用，避免每股重复读取）。
 
     Returns:
         build_plan() 输出；日线加载失败返回 {"symbol": ..., "error": ...}。
@@ -201,8 +180,12 @@ def build_full_plan(
         index_bars = fetch_index_bars(count=60)
         market_score = score_market(breadth, index_bars)
 
-    public = analyze_stock_public(market, code) if with_public else None
-    features = feature_lib.snapshot() if with_features else None
+    public = None
+    if with_public:
+        public = analyze_stock_public(market, code, hot_rank=hot_rank)
+
+    if features is None and with_features:
+        features = feature_lib.snapshot()
 
     return build_plan(
         df,

@@ -39,18 +39,13 @@ NEGATIVE_KEYWORDS = (
 _HEADERS = {"User-Agent": "Mozilla/5.0", "Referer": "https://www.eastmoney.com/"}
 
 
-def _get_json(url: str, timeout: float = 10.0) -> dict | None:
-    req = urllib.request.Request(url, headers=_HEADERS)
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.loads(resp.read().decode("utf-8", "ignore"))
-
-
-def _post_json(url: str, payload: dict, timeout: float = 10.0) -> dict | None:
-    req = urllib.request.Request(
-        url,
-        data=json.dumps(payload).encode(),
-        headers={**_HEADERS, "Content-Type": "application/json"},
-    )
+def _request_json(url: str, payload: dict | None = None, timeout: float = 10.0) -> dict | None:
+    headers = dict(_HEADERS)
+    data = None
+    if payload is not None:
+        headers["Content-Type"] = "application/json"
+        data = json.dumps(payload).encode()
+    req = urllib.request.Request(url, data=data, headers=headers)
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return json.loads(resp.read().decode("utf-8", "ignore"))
 
@@ -62,7 +57,7 @@ def fetch_hot_rank(page_size: int = 100) -> list[dict] | None:
         [{symbol: "SH600127", rank, rank_change}] 或 None（失败）。
     """
     try:
-        data = _post_json(
+        data = _request_json(
             HOT_RANK_URL,
             {
                 "appId": "appId01",
@@ -166,31 +161,23 @@ def analyze_stock_public(market: str, code: str, hot_rank: list[dict] | None = N
          news_sentiment, available}；失败项为 None，available=False 表示
         两项舆情源均不可用（风险评分时计 0 分）。
     """
-    result: dict = {
-        "hot_rank": None,
-        "hot_rank_change": None,
-        "news_hits_total": None,
-        "news_articles_3d": 0,
-        "news_sentiment": None,
-        "available": False,
-    }
     sym = _symbol(market, code)
-
+    rank = rank_change = None
     if hot_rank is None:
         hot_rank = fetch_hot_rank()
     if hot_rank is not None:
         for r in hot_rank:
             if r["symbol"] == sym:
-                result["hot_rank"] = r["rank"]
-                result["hot_rank_change"] = r["rank_change"]
-                result["available"] = True
+                rank = r["rank"]
+                rank_change = r["rank_change"]
                 break
 
     news = fetch_stock_news(code)
+    news_hits = news_sentiment = None
+    news_3d = 0
     if news is not None:
-        result["news_hits_total"] = news["hits_total"]
-        result["news_sentiment"] = news["sentiment"]
-        result["available"] = True
+        news_hits = news["hits_total"]
+        news_sentiment = news["sentiment"]
         # 近 3 日新闻条数（date 形如 "2026-09-02 09:01:00"）
         from datetime import datetime, timedelta
 
@@ -201,5 +188,14 @@ def analyze_stock_public(market: str, code: str, hot_rank: list[dict] | None = N
             except ValueError:
                 continue
             if d >= cutoff:
-                result["news_articles_3d"] += 1
-    return result
+                news_3d += 1
+
+    return {
+        "hot_rank": rank,
+        "hot_rank_change": rank_change,
+        "news_hits_total": news_hits,
+        "news_articles_3d": news_3d,
+        "news_sentiment": news_sentiment,
+        # 两项舆情源任一可用即为 available
+        "available": rank is not None or news is not None,
+    }

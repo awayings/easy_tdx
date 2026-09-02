@@ -17,13 +17,11 @@ import subprocess
 import urllib.request
 from pathlib import Path
 
+from easy_tdx import config as _config
+
 
 def _config_dir() -> Path:
-    """配置目录：`EASY_TDX_CONFIG_DIR` 环境变量优先（与 `easy_tdx.config` 同约定）。
-
-    调用时读取环境变量（懒读取），测试可 monkeypatch；默认 `~/.easy_tdx`。
-    """
-    return Path(os.environ.get("EASY_TDX_CONFIG_DIR", str(Path.home() / ".easy_tdx")))
+    return _config.config_dir()
 
 
 def webhook_urls() -> list[str]:

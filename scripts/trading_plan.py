@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import sys
 from pathlib import Path
@@ -22,8 +23,10 @@ import click
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from easy_tdx import features as feature_lib  # noqa: E402
 from easy_tdx.notify import notify  # noqa: E402
 from easy_tdx.planner import build_full_plan  # noqa: E402
+from easy_tdx.public_sentiment import fetch_hot_rank  # noqa: E402
 from easy_tdx.sentiment import fetch_breadth, fetch_index_bars, score_market  # noqa: E402
 
 
@@ -60,10 +63,20 @@ def main(signals_file, symbol, top_n, base_position, notify_flag, save, table):
         raise click.UsageError("须提供 --signals 或 --symbol")
 
     # 市场情绪批量预取一次（避免每股重复请求 market-stat + 指数日线）
-    market_score = score_market(fetch_breadth(), fetch_index_bars(count=60))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        breadth_f = pool.submit(fetch_breadth)
+        index_f = pool.submit(fetch_index_bars, count=60)
+        breadth, index_bars = breadth_f.result(), index_f.result()
+    market_score = score_market(breadth, index_bars)
     click.echo(
         f"市场情绪：{market_score['label']}（{market_score['score']}/30）", err=True
     )
+
+    # 人气榜与特征快照同样批量预取一次，复用给每股计划
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        rank_f = pool.submit(fetch_hot_rank)
+        feat_f = pool.submit(feature_lib.snapshot)
+        hot_rank, features = rank_f.result(), feat_f.result()
 
     plans = []
     for sig in signals[:top_n]:
@@ -72,6 +85,8 @@ def main(signals_file, symbol, top_n, base_position, notify_flag, save, table):
             sig["code"],
             base_position=base_position,
             market_score=market_score,
+            hot_rank=hot_rank,
+            features=features,
         )
         plans.append(result)
         if "error" in result:

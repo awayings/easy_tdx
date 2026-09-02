@@ -21,6 +21,7 @@ import numpy as np
 import pandas as pd
 
 from easy_tdx.MyTT import ATR, BOLL, MA, MACD, RSI
+from easy_tdx.utils import round2 as _round2
 
 # 计算筹码分布与支撑阻力的日线回溯窗口（约一年交易日）。
 CHIP_WINDOW = 250
@@ -42,10 +43,6 @@ def _arrays(df: pd.DataFrame) -> dict[str, np.ndarray]:
         "low": np.asarray(df["low"], dtype=float),
         "vol": np.asarray(df["vol"], dtype=float),
     }
-
-
-def _round2(x: float | None) -> float | None:
-    return None if x is None or not np.isfinite(x) else round(float(x), 2)
 
 
 # ---------------------------------------------------------------------------
