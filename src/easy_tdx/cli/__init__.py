@@ -23,6 +23,7 @@ from .cmd_company import company_info, company_info_content, finance_info
 from .cmd_ex import ex
 from .cmd_factor import factor
 from .cmd_finance import f10, fund_flow
+from .cmd_formula import formula
 from .cmd_indicator import indicator, indicator_list
 from .cmd_info import server_info, symbol_info
 from .cmd_kline import kline
@@ -34,6 +35,7 @@ from .cmd_quote import quote, quote_list
 from .cmd_run_all import run_all
 from .cmd_tick import tick
 from .cmd_transaction import transaction
+from .cmd_warehouse import warehouse
 from .cmd_web import serve
 
 
@@ -98,3 +100,5 @@ cli.add_command(portfolio)
 cli.add_command(run_all)
 cli.add_command(screen)
 cli.add_command(serve)
+cli.add_command(warehouse)
+cli.add_command(formula)

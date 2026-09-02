@@ -63,27 +63,73 @@ def _resolve_web_dist_dir() -> Path | None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
-    """管理 TDX 连接生命周期：启动时连接，关闭时断开。"""
-    from easy_tdx.client import AsyncTdxClient
+    """管理 TDX 连接生命周期：启动时连接，关闭时断开。
+
+    E2E mock 模式（``EASY_TDX_E2E_MOCK=1``，见 :mod:`easy_tdx.web.e2e_mock`）：
+    全部行情连接替换为合成数据客户端（不连真实服务器、不受交易时段限制），
+    回测 / 自选 / 策略库等纯计算路径保持真实，供 Playwright E2E 使用。
+    """
+    from easy_tdx.web.e2e_mock import is_e2e_mock_enabled, log_mock_banner
+
+    mock_mode = is_e2e_mock_enabled()
 
     # --- 标准 TDX 客户端 ---
     host = app.state.tdx_host
     port = app.state.tdx_port
     timeout = app.state.tdx_timeout
 
-    client = AsyncTdxClient(host=host, port=port, timeout=timeout)
-    try:
-        await client.connect()
-        logger.info("TDX client connected to %s:%s", host, port)
-    except Exception:
-        logger.warning("TDX client connection failed — endpoints will return 503")
+    client: Any
+    if mock_mode:
+        from easy_tdx.web.e2e_mock import MockTdxClient
+
+        log_mock_banner()
+        client = MockTdxClient()
+    else:
+        from easy_tdx.client import AsyncTdxClient
+
+        client = AsyncTdxClient(host=host, port=port, timeout=timeout)
+        try:
+            await client.connect()
+            logger.info("TDX client connected to %s:%s", host, port)
+        except Exception:
+            logger.warning("TDX client connection failed — endpoints will return 503")
 
     app.state.tdx_client = client
 
+    # --- 实时行情 SSE 推送器（共享轮询 + fan-out；mock 模式轮询合成数据） ---
+    try:
+        from easy_tdx.models.enums import Market
+        from easy_tdx.web.quote_streamer import QuoteStreamer
+        from easy_tdx.web.watchlist_store import get_watchlist_store
+
+        store = get_watchlist_store()
+
+        async def _watch_symbols() -> list[tuple[Market, str]]:
+            # SQLite 存 "SH"/"SZ"/"BJ" 字符串，轮询器需要 Market 枚举
+            return [(Market[mkt], code) for mkt, code in store.symbols()]
+
+        # mock 模式不受真实限流/交易时段约束，缩短轮询间隔让 E2E 的
+        # SSE 断言（首帧价格渲染）秒级到达，而不是等盘外 60s 慢拍
+        streamer = QuoteStreamer(
+            client.get_security_quotes,
+            _watch_symbols,
+            trading_interval=2.0 if mock_mode else 8.0,
+            idle_interval=2.0 if mock_mode else 60.0,
+        )
+        streamer.start()
+        app.state.quote_streamer = streamer
+    except Exception:
+        logger.warning("QuoteStreamer 启动失败 — SSE 推送不可用", exc_info=True)
+        app.state.quote_streamer = None
+
     # --- MAC 协议客户端 ---
-    mac_client = None
+    mac_client: Any = None
     enable_mac = getattr(app.state, "enable_mac", True)
-    if enable_mac:
+    if mock_mode:
+        from easy_tdx.web.e2e_mock import MockMacClient
+
+        mac_client = MockMacClient()
+    elif enable_mac:
         try:
             from easy_tdx.mac.client import AsyncMacClient
 
@@ -94,6 +140,23 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             logger.warning("MAC client connection failed — MAC endpoints will return 503")
             mac_client = None
     app.state.mac_client = mac_client
+
+    # --- WebSocket 实时推送枢纽（/ws/realtime/*，按需轮询 + fan-out） ---
+    # 与 MAC 客户端共用一条连接；无订阅时不轮询（见 realtime_hub.py）。
+    # mock 模式关闭交易时段过滤并支持更密轮询，供 E2E / 冒烟脚本随时可推。
+    app.state.realtime_hub = None
+    if mac_client is not None:
+        try:
+            from easy_tdx.web.realtime_hub import RealtimeStreamHub
+
+            app.state.realtime_hub = RealtimeStreamHub(
+                mac_client,
+                interval=float(os.environ.get("EASY_TDX_WS_INTERVAL", "3.0")),
+                sessions=() if mock_mode else None,
+            )
+            logger.info("RealtimeStreamHub 已挂载（/ws/realtime/* 就绪）")
+        except Exception:
+            logger.warning("RealtimeStreamHub 挂载失败 — WS 实时推送不可用", exc_info=True)
 
     # --- 扩展市场客户端（可选） ---
     ex_client = None
@@ -111,6 +174,22 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     app.state.ex_client = ex_client
 
     yield
+
+    # --- 关闭实时行情推送器 ---
+    streamer_svc = getattr(app.state, "quote_streamer", None)
+    if streamer_svc is not None:
+        try:
+            await streamer_svc.stop()
+        except Exception:
+            logger.warning("QuoteStreamer stop failed", exc_info=True)
+
+    # --- 关闭 WebSocket 实时推送枢纽（停止按需轮询任务） ---
+    rt_hub = getattr(app.state, "realtime_hub", None)
+    if rt_hub is not None:
+        try:
+            await rt_hub.shutdown()
+        except Exception:
+            logger.warning("RealtimeStreamHub shutdown failed", exc_info=True)
 
     # --- 依次关闭 ---
     for name, cli in [
@@ -145,8 +224,14 @@ def _create_app(
     *,
     enable_mac: bool = True,
     enable_ex: bool = False,
+    enable_ui: bool = True,
 ) -> FastAPI:
-    """创建并配置 FastAPI 应用实例。"""
+    """创建并配置 FastAPI 应用实例。
+
+    Args:
+        enable_ui: 是否同源托管 Web UI 前端（``easy-tdx serve --no-ui``
+            纯 API 模式传 False：不挂载静态 dist，根路径 404，仅 /api/v1/*）。
+    """
     from easy_tdx.config import get_best_host, get_port, get_timeout
 
     if host is None:
@@ -206,6 +291,7 @@ def _create_app(
     from easy_tdx.web.routers.chanlun import router as chanlun_router
     from easy_tdx.web.routers.ex_market import router as ex_market_router
     from easy_tdx.web.routers.finance import router as finance_router
+    from easy_tdx.web.routers.formula import router as formula_router
     from easy_tdx.web.routers.indicator import router as indicator_router
     from easy_tdx.web.routers.mac_data import router as mac_data_router
     from easy_tdx.web.routers.mac_quotes import router as mac_quotes_router
@@ -214,10 +300,13 @@ def _create_app(
     from easy_tdx.web.routers.server import router as server_router
     from easy_tdx.web.routers.sina import router as sina_router
     from easy_tdx.web.routers.strategies import router as strategies_router
+    from easy_tdx.web.routers.stream import router as stream_router
+    from easy_tdx.web.routers.watchlist import router as watchlist_router
 
     app.include_router(market_router, prefix="/api/v1")
     app.include_router(bars_router, prefix="/api/v1")
     app.include_router(finance_router, prefix="/api/v1")
+    app.include_router(formula_router, prefix="/api/v1")
     app.include_router(block_router, prefix="/api/v1")
     app.include_router(chanlun_router, prefix="/api/v1")
     app.include_router(realtime_router, prefix="/api/v1")
@@ -239,6 +328,10 @@ def _create_app(
     app.include_router(strategies_router, prefix="/api/v1")
     # 服务器设置路由（列出/测速/切换 TDX host）
     app.include_router(server_router, prefix="/api/v1")
+    # 自选股路由（SQLite 持久化，纯 CRUD，不依赖行情连接）
+    app.include_router(watchlist_router, prefix="/api/v1")
+    # 实时行情 SSE 路由（依赖 lifespan 里的 QuoteStreamer）
+    app.include_router(stream_router, prefix="/api/v1")
 
     # --- 前端 dist 托管（生产/打包态同源服务，开发态可缺省） ---
     # 必须在所有 API 路由注册之后：StaticFiles(html=True) 挂在 "/" 会吞掉
@@ -257,7 +350,7 @@ def _create_app(
 
     from fastapi.staticfiles import StaticFiles
 
-    dist_dir = _resolve_web_dist_dir()
+    dist_dir = _resolve_web_dist_dir() if enable_ui else None
     if dist_dir is not None:
         # SPA fallback：前端用 createWebHistory（HTML5 history 模式），
         # 用户直接访问 /optimize、/portfolio 等前端路由或刷新时，后端必须

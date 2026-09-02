@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from datetime import datetime
 from unittest.mock import MagicMock
 
 import pandas as pd
@@ -277,11 +278,15 @@ class TestSessionGating:
         bus = EventBus()
         client = AsyncMockClient([_sample_quotes_df()])
 
-        # 用一个不可能命中的时段（如 23:00-23:59）模拟盘外
+        # 动态构造一个「永远在未来」的 1 分钟时段，保证当前时刻必在盘外。
+        # 此前用固定 23:00-23:59 模拟盘外——测试跑在当地 23 点档时必炸
+        # （时间相关 flaky）。
+        _now = datetime.now()
+        now_min = _now.hour * 60 + _now.minute
         feed = RealtimeDataFeed(
             bus=bus,
             symbols=[(0, "000001")],
-            sessions=((23 * 60, 23 * 60 + 59),),
+            sessions=(((now_min + 5) % (24 * 60), (now_min + 6) % (24 * 60)),),
             interval=0.1,
         )
         await feed.run_async(client, max_iterations=1)
@@ -301,3 +306,29 @@ class TestStopFlag:
 
         await asyncio.gather(feed.run_async(client), _stop_soon())
         assert feed.running is False
+
+    async def test_stop_before_start_exits_immediately(self) -> None:
+        """回归（v1.28）：stop 在 run_async 首次调度前调用也必须生效。
+
+        run_async 首行会把 _running 重置为 True，若无独立停止标志，
+        RealtimeStreamHub 这类「先 stop 再等任务退出」的用法会永久挂起。
+        """
+        bus = EventBus()
+        client = AsyncMockClient([_sample_quotes_df()])
+        feed = RealtimeDataFeed(bus=bus, symbols=[(0, "000001")], sessions=(), interval=0.2)
+        feed.stop()
+
+        task = asyncio.get_running_loop().create_task(feed.run_async(client))
+        await asyncio.wait_for(task, timeout=2.0)  # 启动即退出，不发轮询请求
+        assert client.calls == []
+        assert feed.running is False
+
+    async def test_stop_before_start_sync_loop(self) -> None:
+        """run_sync 路径同样的竞态防护。"""
+        bus = EventBus()
+        client = SyncMockClient([_sample_quotes_df()])
+        feed = RealtimeDataFeed(bus=bus, symbols=[(0, "000001")], sessions=(), interval=0.2)
+        feed.stop()
+
+        await asyncio.wait_for(feed._run_sync_loop(client, None), timeout=2.0)
+        assert client.calls == []

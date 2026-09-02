@@ -17,13 +17,27 @@ easy-tdx 要做的事很简单：**把机构的数据锁砸开，扔到每个普
 
 **34个技术指标**（MACD、KDJ、RSI、BOLL……连”捉妖大师”和”30日乖离率信号”都给你算好）开箱即用。
 **缠论分析**（笔、中枢、买卖点、背驰）一键出结果——你不再需要手画分型、猜线段。
-**内置回测引擎**——写个策略文件，一行命令跑回测，18 个经典策略自带，多因子组合、策略选股扫描，批量对比哪个最赚钱一目了然。
+**内置回测引擎**——写个策略文件，一行命令跑回测，18 个经典策略自带，多因子组合、策略选股扫描，批量对比哪个最赚钱一目了然。**防过拟合验证链**（v1.25 新增）——Walk-Forward 七窗样本外验证（每窗独立开仓）、训练/验证/测试三段适配性体检（8 项可解释检查 + 「高适配」标记）、0-100 综合评分、多 seed 晋级门槛、买入持有基准对比，回测页勾选即出报告——「回测好」升级为「样本外也好」。
 
-**回测可视化 Web UI**（v1.17 新增）——Vue3 + ECharts 单页应用，浏览器里选标的、挑策略、调参数，K 线买卖点、净值回撤、19 项绩效指标一目了然。支持组合回测、参数网格寻优、多策略结果对比，**还能把好策略存进策略库（SQLite 持久化），勾选多个策略做资金分仓组合回测看综合表现**，全程零代码。
+**行情终端 Web UI**（v1.23 重大升级）——`easy-tdx serve` 一条命令，浏览器秒变专业看盘终端：**市场看板**（五大指数实时推送 + 迷你分时、涨跌统计、四维情绪雷达、全市场涨跌分布直方图、涨停雷达、行业/概念热冷榜、涨幅/跌幅/成交额/换手四联排行榜、两市异动雷达）、**自选行情**（输入 6 位代码即加，全表 SSE 实时刷新、行内迷你分时）、**个股详情弹窗**（五档盘口 + 1/3/5 日分时 + 带 MA/BOLL/MACD/KDJ/RSI 指标切换的日 K，一键加自选、一键全策略寻优）、**板块下钻**（行业/概念弹窗看板块走势 + 成分股涨跌榜直达个股）。实时推送采用 SSE 单循环轮询 fan-out 架构（盘中 8 秒一拍，无人订阅自动休眠），自选持久化 SQLite。展示层设计对标专业终端（暗色、红涨绿跌、高信息密度），数据全部来自通达信协议直连——不花一分钱。
+
+<img src="./docs/web-ui-page-4.png" alt="行情终端 Web UI（v1.23）：市场看板 / 自选行情 / 个股与板块详情" />
+
+**回测可视化 Web UI**（v1.17 新增）——Vue3 + ECharts 单页应用，浏览器里选标的、挑策略、调参数，K 线买卖点、净值回撤、19 项绩效指标一目了然。支持组合回测、参数网格寻优、多策略结果对比，**还能把好策略存进策略库（SQLite 持久化），勾选多个策略做资金分仓组合回测看综合表现**，全程零代码。v1.27 起新增「附加分析」开关：勾选后随回测自动跑 Walk-Forward 逐窗柱状图与一条龙评估报告（评分分项 / 高适配徽标 / 买入持有对比）。
 
 **数据评级系统**（v1.17.14 新增）——回测结果顶部直接显示 **S/A/B/C/D 五档评级徽章**，1 秒判断「这个品种适不适合经常参与」。评级**不看收益率**（避免被近期大涨误导），只看风险调整后的持有体验：卡玛比率、最大回撤、胜率、利润因子、夏普、波动率六维加权 + 一票否决（系统亏损/深回撤/低胜率直接低评）。京东方那种「收益 126% 但胜率 35%、回撤 41%」的案例会评 **D 档**——明确告诉普通人「别碰，套牢后回本极难」。三个入口（单标的/组合/寻优）都有评级，长线低频策略不会被冤枉（交易少时只降权胜率维度，不否决整个评级）。
 
+<img src="./docs/web-ui-page-5.png" alt="数据评级系统：S/A/B/C/D 五档评级徽章与评级明细" />
+
+**通达信公式 + 轮动组合**（v1.27 新增）——不会 Python 也照样玩：直接粘贴通达信公式（`买入: CROSS(MA(C,5), MA(C,20));`），命名布尔输出就是买卖信号，计算 / 全市场选股 / 回测一条龙（30+ 函数白名单向量化求值，无未来数据、不走 eval）。**轮动组合引擎**按排名定期换仓：固定槽位等额、跌出排名自动卖出补位、日/周/月调仓、槽内止盈止损，动量或公式数值输出都能当排名分。
+
+**本地 K 线数据仓库**（v1.26 新增）——拉过的行情自动沉淀为 DuckDB 单文件列存：增量同步只补缺口、15:05 前的当日 bar 标记临时值（回测默认忽略，杜绝拿盘中价当收盘价）、缺口/除权跳变/新鲜度健康自检。数据信任层同步加固：QFQ 前复权带双引擎对拍校验（公式法 vs 跳空检测法）、回测任务 SQLite 持久化（重启 serve 对比页历史不清空）、费率按品种自动区分（ETF/可转债免印花税）。
+
 装上就能跑。**Python API + CLI + Web API 三通道**，输出 JSON 天然喂给 AI Agent：Claude Code、OpenClaw、Hermes 直接吃。`easy-tdx serve` 一键起 REST 服务，浏览器打开就是交互式 API 文档。
+
+<img src="./docs/cli-page-1.png" alt="CLI 三通道输出示例：JSON 行情数据" />
+
+<img src="./docs/web-ui-page-6.png" alt="Web API / Web UI 使用示意" />
 
 **你不懂 TCP 协议？不用。**
 **你不会写量化框架？不用。**
@@ -317,6 +331,16 @@ easy-tdx backtest SZ 300308 --strategy-file strategies/expma_cross.py --count 20
 easy-tdx backtest SZ 000001 --strategy-file strategies/chanlun_strategy.py --chanlun-level DAILY --table
 ```
 
+**样本外验证（v1.25）：**
+
+```bash
+# 附加 Walk-Forward 七窗样本外验证（每窗独立开仓，窗口数可调）
+easy-tdx backtest SZ 300308 --strategy-file strategies/expma_cross.py --wf --wf-windows 7
+
+# 一条龙评估：回测 + WF + 适配性体检 + 综合评分 + S-D 评级 + 买入持有基准对比
+easy-tdx backtest SZ 300308 --strategy-file strategies/expma_cross.py --evaluate
+```
+
 输出示例：
 
 ```
@@ -442,7 +466,33 @@ easy-tdx portfolio --stocks SZ:000001,SH:600519 \
 | `--allocation` | 资金分配方式（目前支持 `equal` 均等分配） |
 | `--chanlun-level` | 自动计算缠论分析并注入策略（如 DAILY/30MIN） |
 
-**回测可视化 Web UI（v1.17 新增）：**
+### 通达信公式（v1.27）
+
+粘贴通达信公式即可计算 / 选股 / 回测——命名布尔输出自动成为买卖信号（名字含「买/卖」或 BUY/SELL 优先），30+ 白名单函数（MA/EMA/SMA/HHV/LLV/REF/CROSS/LONGCROSS/MACD/KDJ/RSI/BOLL/ATR…）向量化求值，无未来数据：
+
+```bash
+# 公式计算（最后一根各列值 + 最近信号明细）
+easy-tdx formula compute SH 600519 --formula "金叉: CROSS(MA(C,5), MA(C,20));"
+
+# 批量选股：信号在最后一根 = 1 的标的（--symbols 支持逗号分隔或 @文件）
+easy-tdx formula screen --symbols SH:600519,SZ:000001 --formula "金叉: CROSS(MA(C,5), MA(C,20));"
+
+# 公式回测：买/卖列自动挑选，信号下一根开盘成交，输出绩效 + 评级 + 评分
+easy-tdx formula backtest SH 600519 --file my_formula.txt
+```
+
+### 本地 K 线仓库（v1.26）
+
+行情沉淀为 DuckDB 单文件列存（可选依赖：`pip install easy-tdx[warehouse]`），增量同步 + 临时收盘价状态机 + 健康自检：
+
+```bash
+easy-tdx warehouse sync --symbols SH:600519,SZ:000001   # 首次全量，此后只补尾部
+easy-tdx warehouse query SH 600519 --count 30           # 默认忽略未收盘的临时 bar
+easy-tdx warehouse stats                                # 各标的行数 / 数据范围
+easy-tdx warehouse check                                # 缺口 / 除权跳变 / 新鲜度体检
+```
+
+**行情终端 + 回测可视化 Web UI（v1.17 新增，v1.23 升级为行情终端）：**
 
 <img src="./docs/web-ui-page-1.png" alt="Web UI 截图 1" />
 
@@ -450,7 +500,15 @@ easy-tdx portfolio --stocks SZ:000001,SH:600519 \
 
 <img src="./docs/web-ui-page-3.png" alt="Web UI 截图 3" />
 
-不想写命令行？用浏览器。`easy-tdx serve` 一条命令启动，浏览器自动打开 `http://localhost:8000`，就是完整的回测可视化界面。
+不想写命令行？用浏览器。`easy-tdx serve` 一条命令启动，浏览器自动打开 `http://localhost:8000`。
+
+Web UI 包含两大模块：
+
+- **行情终端（v1.23 新增）**——侧边栏专业终端布局：
+  - **市场看板**：五大指数实时行情（SSE 推送）、全市场涨跌统计（涨/跌/平/涨停/跌停 + 堆叠条）、行业/概念板块热度榜、涨幅榜/跌幅榜、两市异动雷达（加速拉升/封涨停板/大单托盘等），点击个股打开五档盘口 + 分时/日K 对话框；
+  - **自选行情**：输入 6 位代码一键加自选（SQLite 持久化），全表实时刷新（SSE），行内迷你分时图，点击行看个股详情；
+  - **实时推送架构**：后端单条轮询循环 fan-out 到所有 SSE 连接（交易时段 ~8s 一拍，盘外降频 60s，无人订阅自动休眠），前端指数退避重连。
+- **回测工作台（v1.17 起）**——浏览器里选标的、挑策略、调参数，K 线买卖点、净值回撤、19 项绩效指标一目了然。支持组合回测、参数网格寻优、多策略结果对比，还能把好策略存进策略库（SQLite 持久化），勾选多个策略做资金分仓组合回测看综合表现，全程零代码。
 
 **前置条件：**
 
@@ -1112,22 +1170,38 @@ curl -X POST "http://localhost:8000/api/v1/chanlun/analyze" \
 
 ### WebSocket 实时行情
 
-> ⚠️ **当前未联动数据源**：`create_app()` 尚未创建 `EventBus`，此 WS 端点目前
-> 不会推送任何行情。计划在后续版本接入 `RealtimeDataFeed` 后打通。
-> 如需实时行情，请先用上文「实时行情轮询」的编程 API。
+`/api/v1/ws/realtime/{symbol}`（v1.28 起接通数据源）：连接即订阅指定标的，服务端
+经 `RealtimeDataFeed`（按 `interval` 秒轮询五档快照 → `EventBus`）推送 tick 帧；
+连接断开自动退订，无人订阅时完全停止轮询。盘外时段默认只睡不拉（交易时段过滤），
+本地冒烟/演示可配合 `EASY_TDX_E2E_MOCK=1` 的合成行情随时验证（见
+`scripts/ws_smoke.py`）。
 
 ```javascript
-// JavaScript 示例
-const ws = new WebSocket("ws://localhost:8000/ws/realtime/SZ000001");
+const ws = new WebSocket("ws://localhost:8000/api/v1/ws/realtime/SZ000001");
 
 ws.onmessage = (event) => {
-    const data = JSON.parse(event.data);
-    console.log(data);  // {type: "tick", market: "SZ", code: "000001", price: 10.5, ...}
+    const frame = JSON.parse(event.data);
+    if (frame.type === "tick") {
+        // {type:"tick", symbol:"SZ000001", market:"SZ", code:"000001",
+        //  price:10.5, volume:12345, ts:1760000000.0,
+        //  open, high, low, pre_close, amount, name}
+        console.log(frame.symbol, frame.price, frame.ts);
+    } else if (frame.type === "ping") {
+        // 服务端 30s 空闲心跳，忽略即可（客户端无须回包）
+    }
 };
 
-// 动态订阅更多标的
+// 动态订阅更多标的（服务端回 {"type":"status","msg":"subscribed SH600000"}）
 ws.send(JSON.stringify({action: "subscribe", symbol: "SH600000"}));
+// 退订
+ws.send(JSON.stringify({action: "unsubscribe", symbol: "SH600000"}));
 ```
+
+浏览器接入建议（自动重连 + 心跳容忍）：`onclose` 后指数退避重连（参考
+`web-ui/src/stores/quotes.ts` 对 SSE 的同类处理）；`{"type":"ping"}` 心跳帧直接
+忽略、不回包；连续 N 秒无任何帧（含 ping）再视为僵死连接主动重连。协议字段完整
+说明见 `docs/api_reference.md` 的 WebSocket 一节；单标的 WS 订阅与看板 SSE
+（全量快照）并存不冲突，按需选用。
 
 ### API 文档
 
@@ -1398,6 +1472,16 @@ with MacClient.from_best_host() as c:
     df = c.get_unusual(Market.SH)               # 市场异动
     df = c.get_symbol_info(Market.SZ, "000001") # 个股特征快照
     df = c.get_server_info()                     # 服务器交易时段
+```
+
+`get_unusual` 返回列含 `unusual_type`（类型码）与 `desc`（中文描述），共 19 种类型
+（主力买卖/加速拉升/急速拉升/盘中强弱/竞价异动/涨跌停/大单盘口等）。类型码→名称
+可用顶层常量映射：
+
+```python
+from easy_tdx import UNUSUAL_TYPE_NAMES
+
+df["type_name"] = df["unusual_type"].map(UNUSUAL_TYPE_NAMES)
 ```
 
 ### 扩展市场
