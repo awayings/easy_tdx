@@ -2,6 +2,8 @@
 // 与 src/easy_tdx/web/backtest_schemas.py 及 backtest router 的响应保持一致。
 // 后端是唯一事实源；这里只做类型契约。
 
+import type { GradeResult } from './grading/types'
+
 // ── 策略 schema（GET /api/v1/backtest/strategies） ───────────────────────────
 
 export type ParamType = 'int' | 'float' | 'bool' | 'str'
@@ -50,7 +52,15 @@ export interface DataFrameResponse {
 // ── 回测请求（POST /api/v1/backtest/run） ─────────────────────────────────────
 
 export type ExecutionMode = 'next_open' | 'next_close'
-export type Category = 'DAY' | 'WEEK' | 'MONTH' | 'MIN_5' | 'MIN_15' | 'MIN_30' | 'MIN_60'
+export type Category =
+  | 'DAY'
+  | 'WEEK'
+  | 'MONTH'
+  | 'MIN_5'
+  | 'MIN_15'
+  | 'MIN_30'
+  | 'MIN_60'
+  | 'MIN_120'
 
 export interface BacktestRequest {
   strategy: string
@@ -89,6 +99,19 @@ export interface Performance {
   max_loss: number
   avg_holding_days: number
   volatility: number
+  // v1.28 深度风险指标（老版本保存的结果可能缺省）
+  /** Ulcer 指数：回撤深度平方均值开方，越小持有体验越好 */
+  ulcer_index?: number
+  /** 95% 日 VaR（历史分位数法，正数 = 单日最大损失幅度） */
+  var_95?: number
+  /** 95% 日 CVaR / 期望损失 */
+  cvar_95?: number
+  /** SQN 系统质量数（>2 可用、>4 优秀、>6 极佳） */
+  sqn?: number
+  /** 最大连胜笔数 */
+  max_consecutive_wins?: number
+  /** 最大连亏笔数 */
+  max_consecutive_losses?: number
 }
 
 export interface EquityPoint {
@@ -139,6 +162,7 @@ export interface TaskState {
     | SignalScanResult
     | WalkForwardResult
     | EvaluateReport
+    | LlmChatResult
     | null
   error: string | null
   description: string
@@ -175,16 +199,27 @@ export interface PortfolioBacktestRequest {
   end_date?: string
 }
 
+/** 组合整体绩效：与单标的同口径的完整指标（PerformanceAnalyzer 算出，
+ * 含 SQN/最大连胜连亏等）+ 组合专属的标的数与总资金。 */
+export type PortfolioTotalPerformance = Performance & {
+  total_stocks: number
+  total_cash: number
+}
+
+/** 组合交易明细行：单标的 Trade 附来源标的（组合层汇总成交表）。 */
+export type PortfolioTrade = Trade & { symbol: string }
+
 export interface PortfolioResult {
-  total_performance: {
-    total_return: number
-    annual_return: number
-    total_stocks: number
-    total_cash: number
-  }
+  total_performance: PortfolioTotalPerformance
   individual_results: Record<string, BacktestResult>
   equity_allocation: Record<string, number>
   combined_equity: EquityPoint[]
+  /** 组合层汇总成交（各标的 concat + symbol 列；v1.31 起返回，老结果缺省） */
+  trades?: PortfolioTrade[]
+  /** 后端组合评级（净值曲线 5 维度口径，v1.31 起返回，老结果缺省） */
+  grade?: GradeResult
+  /** 后端综合评分（v1.31 起返回，老结果缺省） */
+  score?: StrategyScoreReport
 }
 
 // ── 参数网格寻优（Phase 4） ──────────────────────────────────────────────────
@@ -603,6 +638,15 @@ export interface EvaluateBenchmarkReport {
   }
   /** 策略总收益 - 买入持有总收益 */
   excess_return: number
+  // v1.28 CAPM / 主动管理对比指标（老版本保存的报告可能缺省）
+  /** 年化 CAPM α：剔除基准影响后的超额收益，>0 仍有真实超额 */
+  alpha?: number
+  /** β：对基准的敏感度（1 = 与基准同涨跌） */
+  beta?: number
+  /** 年化信息比率：每 1 单位跟踪误差换来的超额收益 */
+  information_ratio?: number
+  /** 年化跟踪误差 */
+  tracking_error?: number
 }
 
 export interface EvaluateReport {
@@ -612,4 +656,165 @@ export interface EvaluateReport {
   fitness: FitnessReport
   benchmark: EvaluateBenchmarkReport
   config: Record<string, unknown>
+}
+
+// ── 交易时段（GET /api/v1/market/session） ───────────────────────────────────
+
+export interface MarketSessionInfo {
+  is_trading_time: boolean
+  sessions: Array<{ start: string; end: string }>
+  session_desc: string
+  server_time: string
+  weekday: number
+}
+
+// ── LLM 配置与对话（GET/PUT /api/v1/llm/config 等） ──────────────────────────
+
+export interface LlmProviderInfo {
+  id: string
+  label: string
+  base_url: string
+  default_model: string
+  api_style: 'openai' | 'anthropic'
+  needs_key: boolean
+}
+
+export interface LlmConfigInfo {
+  provider: string
+  /** 脱敏回显（sk-***abcd）；提交时空串/原样回传 = 不修改已存 key */
+  api_key: string
+  api_url: string
+  model: string
+  temperature: number
+  max_tokens: number
+  timeout: number
+  system_prompt: string
+}
+
+export interface LlmConfigResponse {
+  config: LlmConfigInfo
+  providers: LlmProviderInfo[]
+  configured: boolean
+  missing: string[]
+  config_path: string
+  resolved: { api_url: string; model: string }
+}
+
+export interface LlmConfigUpdate {
+  provider: string
+  api_key?: string
+  api_url?: string
+  model?: string
+  temperature?: number
+  max_tokens?: number
+  timeout?: number
+  system_prompt?: string
+}
+
+export interface LlmTestResult {
+  ok: boolean
+  latency_ms: number
+  model: string
+  provider: string
+  reply?: string
+  error?: string
+}
+
+export interface LlmChatResponse {
+  reply: string
+  model: string
+  provider: string
+}
+
+/** AI 解读后台任务（POST /llm/chat/async）完成后的 result 结构。 */
+export interface LlmChatResult {
+  reply: string
+  model: string
+  provider: string
+  elapsed: number
+}
+
+// ── AI 解读历史（GET /api/v1/llm/history） ───────────────────────────────────
+
+/** 策略上下文（随解读落库，供「去回测」引导跳转）。 */
+export interface LlmChatContext {
+  strategy: string
+  strategy_label: string
+  symbol: string
+  category: string
+  params: Record<string, number | string | boolean>
+  start_date: string
+  end_date: string
+}
+
+export interface LlmHistoryItem {
+  id: number
+  created_at: string
+  provider: string
+  model: string
+  prompt: string
+  reply: string
+  elapsed: number
+  strategy: string
+  strategy_label: string
+  symbol: string
+  category: string
+  params: Record<string, number | string | boolean>
+  start_date: string
+  end_date: string
+}
+
+export interface LlmHistoryResponse {
+  items: LlmHistoryItem[]
+  count: number
+}
+
+/** 核心龙头池条目（GET /api/v1/market/core-leaders）。 */
+export interface CoreLeaderRow {
+  code: string
+  name: string
+  market: string
+}
+
+// ── 中金所成交持仓排名（GET /api/v1/ccpm/*） ─────────────────────────────────
+
+/** 品种元数据（含给新手的科普文案）。 */
+export interface CcpmProductMeta {
+  code: string
+  name: string
+  category: string
+  underlying: string
+  underlying_code: string
+  unit: string
+  intro: string
+}
+
+export interface CcpmProductsResponse {
+  products: CcpmProductMeta[]
+  count: number
+}
+
+/** 排名行（宽表：合约 × 排名 对齐三类排名；单位均为「手」）。 */
+export interface CcpmRankRow {
+  trading_day: string
+  product: string
+  instrument: string
+  rank: number
+  vol_member: string | null
+  vol: number | null
+  vol_chg: number | null
+  long_member: string | null
+  long_pos: number | null
+  long_chg: number | null
+  short_member: string | null
+  short_pos: number | null
+  short_chg: number | null
+}
+
+export interface CcpmRankResponse {
+  trading_day: string
+  product: string
+  product_name: string
+  data: CcpmRankRow[]
+  count: number
 }

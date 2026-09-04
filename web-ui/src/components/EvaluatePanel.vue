@@ -5,11 +5,18 @@
 import { computed } from 'vue'
 
 import GradeDetails from './GradeDetails.vue'
+import GlossaryList from './GlossaryList.vue'
+import HelpCollapse from './HelpCollapse.vue'
 import { gradePerformance } from '../grading'
+import { evaluateGlossary } from '../data/glossary'
 import type { EvaluateReport } from '../types'
+import type { GradeResult } from '../grading/types'
 
 const props = defineProps<{
   report: EvaluateReport
+  /** 评级覆盖：组合级报告传入组合口径评级（gradePortfolio / 后端
+   * grade_portfolio_equity），缺省时按单标的 6 维度本地重算。 */
+  gradeOverride?: GradeResult | null
 }>()
 
 /** 综合评分分项（含权重，展示顺序固定） */
@@ -29,9 +36,32 @@ const scoreComponents = computed(() => {
   }))
 })
 
-const grade = computed(() => gradePerformance(props.report.performance))
+const grade = computed(() => props.gradeOverride ?? gradePerformance(props.report.performance))
 
 const excess = computed(() => props.report.benchmark.excess_return)
+
+/** v1.28 CAPM/主动管理指标（老报告缺省时不渲染该行；good=null 为中性不着色） */
+const capm = computed(() => {
+  const b = props.report.benchmark
+  if (b.alpha === undefined || b.beta === undefined) return null
+  return [
+    { label: 'α 年化超额', value: b.alpha, fmt: 'percent', good: (b.alpha ?? 0) >= 0 },
+    { label: 'β 敏感度', value: b.beta, fmt: 'ratio', good: null },
+    {
+      label: '信息比率',
+      value: b.information_ratio ?? 0,
+      fmt: 'ratio',
+      good: (b.information_ratio ?? 0) >= 0,
+    },
+    { label: '跟踪误差', value: b.tracking_error ?? 0, fmt: 'percent', good: null },
+  ]
+})
+
+function fmtCapm(v: number, fmt: string): string {
+  if (!Number.isFinite(v)) return '-'
+  if (fmt === 'percent') return `${v >= 0 ? '+' : ''}${(v * 100).toFixed(2)}%`
+  return v.toFixed(2)
+}
 </script>
 
 <template>
@@ -88,6 +118,15 @@ const excess = computed(() => props.report.benchmark.excess_return)
         </span>
       </div>
     </div>
+    <!-- v1.28：CAPM / 主动管理对比（α/β/信息比率/跟踪误差） -->
+    <div v-if="capm" class="bench-row bench-row-4">
+      <div v-for="c in capm" :key="c.label" class="bench-cell">
+        <span class="stat-label">{{ c.label }}</span>
+        <span class="mono" :class="c.good === null ? '' : c.good ? 'pos' : 'neg'">
+          {{ fmtCapm(c.value, c.fmt) }}
+        </span>
+      </div>
+    </div>
     <p v-if="excess < 0" class="bench-warn">⚠ 策略跑输同区间买入持有——研发阶段的一票否决信号。</p>
 
     <!-- 适配性检查（8 项可解释） -->
@@ -105,6 +144,11 @@ const excess = computed(() => props.report.benchmark.excess_return)
     <!-- 评级（复用本地评级，与后端字段口径一致） -->
     <h4 class="sub-title">评级（不看收益率）</h4>
     <GradeDetails :result="grade" />
+
+    <!-- 名词解释（默认折叠，新手向） -->
+    <HelpCollapse label="名词解释：综合评分 / 高适配 / α·β·IR / 适配性体检…">
+      <GlossaryList :sections="evaluateGlossary" />
+    </HelpCollapse>
   </div>
 </template>
 
@@ -200,6 +244,9 @@ const excess = computed(() => props.report.benchmark.excess_return)
   grid-template-columns: repeat(3, 1fr);
   gap: 8px;
   margin-bottom: 6px;
+}
+.bench-row-4 {
+  grid-template-columns: repeat(4, 1fr);
 }
 .bench-cell {
   display: flex;

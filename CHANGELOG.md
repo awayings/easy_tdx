@@ -2,10 +2,247 @@
 
 本文件记录 easy-tdx 的版本变更。格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/)。
 
-## [未发布]
+## [1.31.3] — 2026-09-04
+
+**紧急修复盘中分时数据错乱（v1.31.2 回归），并包含 CLI 分析能力对齐**——v1.31.2 引入的"盘中走实时分时命令"路径存在解析错位：实时分时命令（0x0c1b）响应每条记录实际 2 个字段，解析器按 3 字段读取，从第二条起全部错位——个股与指数**盘中**分时出现天文价格（如科创50 出现 67008）与负成交量（如 -2296）。实测确认历史分时接口盘中查"当日"即返回已成交分钟（午休 12:33 时返回上午 120 条，尾价与实时行情现价吻合），实时命令本无必要。本版同时包含此前合入 main 的 CLI 分析能力对齐与寻优指标缓存修复。
+
+### 紧急修复（分时）
+
+- **分时全程改走历史分时接口**（[client.py](src/easy_tdx/client.py) `get_minute_time_data`，同步+异步）：先查今天——盘中=已成交部分、收盘后=全天 240 条；空（盘前/周末/节假日）回退最近交易日。实时分时命令从 client 移除，docstring 记录弃用原因（响应布局与解析器不匹配）。
+- v1.31.2 的**盘前/休市回退**与**指数K线命令适配**（乱码日期检测自动换 `GetIndexBarsCmd`）经验证正确，保持不变。
+
+### 新增（CLI 对齐 WebUI/Python SDK 的分析能力）
+
+补齐 CLI 此前缺失的三块：一键参数寻优、内置策略列表、组合级 WF/一条龙。引擎层全部复用现成实现（`ParamGridOptimizer`/`STRATEGY_PRESETS`/`evaluate_portfolio`/`PortfolioWalkForwardEngine`），CLI、Web API（`/backtest/optimize`、`/backtest/evaluate` 等）与 Python SDK 三条通路能力对等。
+
+- **`easy-tdx optimize` 参数网格寻优命令**（[backtest/cli.py](src/easy_tdx/backtest/cli.py)）：单策略网格搜索（`--strategy ma_cross` 用该策略预设网格，或 `--param fast=5,10,15 --param slow=20,60` 自定义），以及 `--all` 一键寻优所有内置策略——逐策略按 `STRATEGY_PRESETS` 预设网格寻优后按总收益率全局排名（对齐 Web UI /optimize 页与 `/backtest/optimize-all/run/async`）。支持 `--workers N` 进程级并行、`--table` 排名表 / JSON 全量输出（含热力图矩阵）。`--strategy` 与 `--param` 在联网取数前前置校验（未知策略/未知参数/网格超限快速失败）。
+- **`easy_tdx.backtest.optimizer.optimize_all_strategies` Python API**（[optimizer.py](src/easy_tdx/backtest/optimizer.py)）：一键全策略寻优的规范实现（`_optimize_strategy_best` 模块级 worker 可 pickle，主进程解析 label、跨策略 ProcessPool 并行），CLI 与后续 Web 端可共用；`presets` 参数支持注入子集网格（测试用）。
+- **`easy-tdx strategies` 内置策略列表命令**：列出注册表全部策略（名称/中文标签/参数默认值/预设寻优网格点数/说明），`--output json` 输出与 Web API `GET /backtest/strategies` 同构的完整 schema。
+- **`easy-tdx portfolio --evaluate / --wf`**：组合级一条龙评估（组合回测 + 组合 WF + 跨标的适配性体检 + 综合评分 + 组合评级 + 等权买入持有基准对比，调 `evaluate_portfolio`）与组合级 Walk-Forward（`PortfolioWalkForwardEngine`），输出与 Web UI /portfolio 页同构；同时补上 `--auto-fees` 品种感知费率旗标。
+
+### 修复
+
+- **寻优指标缓存自 v1.25 起全程 0 命中（两段式加速静默失效）**（[indicator_cache.py](src/easy_tdx/backtest/indicator_cache.py)）：缓存键此前用数组**对象 id** 做签名，而引擎每次 run 会重建数组对象，id 逐点漂移导致跨网格点永不命中——`test_optimizer_cache_reuse_across_grid_points` 一直在失败（仅在带缓存统计的测试里暴露，正确性对拍不受影响，属纯性能回归）。改为**内容哈希**签名（blake2b 16 字节 + dtype/shape），同值不同对象视为同一数据；附带删除防 id 复用的 `_array_refs` 强引用表（内容寻址下不再需要，缓存生命周期内的数组引用也随之释放）。实测 16 点网格命中率 38%，新增「同内容不同对象必须命中」回归测试。
+
+### 测试
+
+- **分时单测重写为 7 例**（同步/异步双口径）：盘中只查今日历史分时（断言单次请求）、盘前回退最近交易日、指数锚点换指数K线命令、无日 K 兜底；盘中实测四类标的（个股 301008 / 上证指数 / 科创50 000688 / 880 板块指数）全部返回当日已成交分钟、尾价与实时现价吻合、零异常行（价格 ≤0 或成交量 <0 的行数为 0）。
+- CLI 侧新增 13 例：`optimize` 命令互斥/未知策略/未知参数/畸形参数校验（联网前快速失败）、`strategies` 表格与 JSON 输出、`portfolio --help` 新旗标、`optimize_all_strategies` 排名序/label/skipped/JSON 原生类型、指标缓存「同内容不同对象必须命中」回归。
+- 实测验证：`strategies` 列出 54 策略；`optimize --strategy`（3×3 网格）与 `optimize --all --workers 4`（54 策略 316 网格点）真实行情跑通；`portfolio --evaluate`（完整报告含评分/评级/WF/基准）与 `--wf` 真实跑通。
+- 全量回归：pytest 1629 全部通过、ruff/ruff format/mypy 全绿（v1.25 既有失败 `test_optimizer_cache_reuse_across_grid_points` 随缓存键修复转绿）。
+- CI 排除 `test_ai_llm.py`：LLM 异步任务轮询在 CI 无 API key 且 runner 卡顿时必然轮询超时抖挂，本地（有 mock）仍全量执行；排除后覆盖率 71%，远高于 60% 门槛。
+
+## [1.31.2] — 2026-09-04
+
+**分时接口全场景修复：盘前/休市不再为空，指数从无到有**——`/api/v1/minute`（今日分时）此前固定用"今天的日期"走历史分时接口，而历史分时的当日数据要收盘后才生成：盘前、周末、节假日调用必然拿到 `{"data":[],"count":0}`，WebUI 分时图一片空白；指数（上证指数 000001、创业板指 399006、880 板块指数等）则**任何时候都为空**——旧实现从未适配指数。本版以「最新一根日 K 的日期」锚定最近交易日，个股与指数全场景有数。
+
+### 修复
+
+- **盘前/周末/节假日分时为空**（[client.py](src/easy_tdx/client.py) `get_minute_time_data`，同步+异步双口径）：先取最新日 K 日期锚定最近交易日——等于今天（盘中/收盘后）走实时分时命令 `GetMinuteTimeDataCmd`（协议层早有此命令但 client 从未使用），早于今天（盘前/休市）自动回退查该日的历史分时。分时图任何时候打开都显示最近交易日的完整 240 条，9:30 开盘后自动切换为当日实时分时；无需维护节假日表（交易日由服务器日 K 事实决定）。
+- **指数分时始终为空**：指数的 K 线响应每条比个股多 4 字节，锚点查询用个股 K 线命令解析指数数据会错位出乱码日期（实测解析出 116785687）。`_latest_trade_date` 现在先按个股命令查询并校验日期落位 `[19900101, 今天]`，不合法自动换指数 K 线命令 `GetIndexBarsCmd` 重查——不依赖代码前缀规则，个股/指数/880 板块指数全部自适应。
+- **盘前占位脏数据防御**：实时分时接口在盘前会返回 240 条价格从 0 累加的占位数据，识别（首条价格 0）后不采用，避免脏数据进图。
+
+### 测试
+
+- 分时单测重写+扩充为 8 例（同步/异步双口径）：盘前回退最近交易日、盘中走实时命令、占位数据防御、无日 K 兜底（维持旧契约）、指数乱码日期→换指数 K 线命令锚定。
+- 实测三类真实验证：个股 301008 / 指数 000001・399006・880958 盘前均返回最近交易日（2026-09-03）240 条，分时尾价与日 K 收盘价一致。
+
+## [1.31.1] — 2026-09-04
+
+**策略库「重跑到今天」补齐组合分析**——v1.31.0 把组合分析链路补到了多标的组合页（/portfolio），但策略库（/strategies）里 `kind: 'multi'` 的**多策略组合**卡片点「↻ 重跑到今天」仍只跑主回测，没有 Walk-Forward、一条龙和 AI 解读；且结果区「绩效指标」表只透传 19 项老指标，v1.28 的深度 6 项（SQN/最大连胜连亏/Ulcer/VaR/CVaR）被丢弃。本版把分析链路延伸到多策略组合（N 策略 × 各自原标的），WebUI/REST 双端同步。
+
+### 新增（多策略组合级分析，对齐单标的）
+
+- **多策略组合级 Walk-Forward**（`MultiStrategyWalkForwardEngine`，[walkforward.py](src/easy_tdx/backtest/walkforward.py)）：组合 WF 泛化为**槽位模型**（`_ComboSlot` + `_ComboWalkForwardBase` 基类），每个槽位是「一个策略 × 它自己的标的」（key 形如 `{label}@{symbol}`，与 `MultiStrategyEngine.individual_results` 一致），复用切窗语义（日期并集切窗、每窗独立开仓、上下文预热不污染信号）与 `WalkForwardResult` 输出结构；`PortfolioWalkForwardEngine`（一个策略 × 多标的）改为基类子类，行为不变。前端 WalkForwardPanel 零改动直接渲染。REST 端点 `POST /backtest/multi-strategy/wf/run/async`。
+- **多策略组合级一条龙评估**（`evaluate_multi`，[benchmark.py](src/easy_tdx/backtest/benchmark.py)）：`MultiStrategyEngine` 组合回测 + 多策略组合 WF + 逐槽位三段体检（各自策略 × 各自标的，8 项检查按「≥60% 标的通过」多数口径聚合）+ 综合评分（叠加 WF 一致性）+ 组合评级 + **各槽位标的的等权买入持有基准对比**（α/β/信息比率/跟踪误差），报告结构与单标的 `evaluate_strategy` 同构。REST 端点 `POST /backtest/multi-strategy/evaluate/run/async`。
+- **策略库组合结果区新增分析入口**（[StrategiesView.vue](web-ui/src/views/StrategiesView.vue)）：「重跑到今天」跑完后，结果区标题栏新增 **🔬 WF 样本外验证** / **📋 一条龙评估** / **🤖 AI 解读** 按钮，按需触发（复用最近一次组合回测的 items/cash，区间保持不变——检验的是"这组配置"的稳定性）；WF 面板与一条龙面板与单标的/多标的组合页同构。
+- **组合 AI 解读 multi 模式**（`buildPortfolioAiPrompt`，[aiPrompt.ts](web-ui/src/aiPrompt.ts)）：角色设定改为「N 个策略各跑各自的原标的，资金均分」语境，任务建议改为"换掉拖后腿的策略"等组合向表述；配置段列出策略明细（替代单一策略/参数行），各槽位表现榜按收益降序；解读随已跑完的 WF/一条龙数据一并打包。
+- **多策略组合回测响应附带评级与评分**：`_run_multi_strategy_backtest` 与单标的/多标的组合响应同构，返回 `grade`（组合净值 5 维度口径）与 `score`。
+
+### 修复
+
+- **策略库绩效指标表缺深度指标**：`comboPerf` 此前只映射 19 项，v1.28 的 SQN/最大连胜连亏/Ulcer/VaR/CVaR 6 项被丢弃——补齐全 25 项，与单标的 MetricTable 同口径。
+
+### 测试
+
+- 后端新增 8 例：多策略组合 WF 引擎（窗口结构/与 Portfolio 版同构/空槽位容错）、`evaluate_multi`（报告结构/买入持有超额近零/JSON 兼容）、两个新端点的 Web 级端到端（mock 取数 + 真实引擎）。
+- 前端新增 1 例：aiPrompt multi 模式（策略明细语境、槽位表现段标题、不再出现单一策略行）。
+- 全量验证：pytest 1611 通过、ruff/ruff format/mypy 全绿、node --test 5/5、Playwright E2E 9/9。
+
+## [1.31.0] — 2026-09-03
+
+**组合回测分析体系全面对齐单标的**——此前单标的回测已有 Walk-Forward 样本外验证、一条龙评估、SQN 系统质量/最大连胜连亏等 25 项绩效指标、S-D 评级与 AI 解读；而组合回测（一个策略 × 多只标的）只能看 4 个数字（总收益/假年化/标的数/总资金）加一条净值曲线，"组合跑得到底好不好、稳不稳"全靠猜。本版把整条分析链路在组合端补齐，WebUI/REST 双端同步。
+
+### 新增（组合级分析，对齐单标的）
+
+- **组合完整 25 项绩效指标**（[portfolio_engine.py](src/easy_tdx/backtest/portfolio_engine.py)）：合并净值曲线 + 各标的汇总成交喂 `PerformanceAnalyzer`，输出与单标的同口径的完整指标——含 **SQN 系统质量、最大连胜、最大连亏**，及夏普/索提诺/卡玛/Ulcer/VaR/CVaR/胜率/盈亏比/平均持仓天数等；另附 `total_stocks` / `total_cash` 组合字段。WebUI 组合页新增「组合绩效指标」表（复用 MetricTable）。
+- **组合级 Walk-Forward 样本外验证**（`PortfolioWalkForwardEngine`，[walkforward.py](src/easy_tdx/backtest/walkforward.py)）：按**全部标的日期并集**切窗（前 30% 预热区 + N 个连续测试窗），每窗各标的带上下文独立回测（`warmup_bars` 压制上下文信号、窗口起点空仓），合成组合窗内净值后算与单标的同构的逐窗指标；晚上市/停牌标的自动逐窗跳过。输出复用 `WalkForwardResult` 结构，前端 WalkForwardPanel 零改动直接渲染。REST 端点 `POST /backtest/portfolio/wf/run/async`。
+- **组合级一条龙评估**（`evaluate_portfolio`，[benchmark.py](src/easy_tdx/backtest/benchmark.py)）：组合回测 + 组合 WF + 适配性体检 + 综合评分（叠加 WF 一致性）+ 组合评级 + **等权买入持有组合基准**对比（α/β/信息比率/跟踪误差），报告结构与单标的 `evaluate_strategy` 同构，前端 EvaluatePanel 直接复用。其中适配性体检为**跨标的多数口径聚合**：逐标的跑三段体检，8 项检查按「≥60% 标的通过」合成，段指标取截面均值（收益/夏普/胜率均值、回撤取最深、交易数合计），诚实反映组合整体形态。REST 端点 `POST /backtest/portfolio/evaluate/run/async`。
+- **组合交易明细**：`PortfolioResult` 新增组合层汇总成交表（各标的 concat + `symbol` 列），`PerformanceAnalyzer` 的 FIFO 持仓天数配对支持按 `symbol` 分组（避免 A 股的买入被 B 股的卖出错误配对）；组合页新增带标的列的成交明细表（按时间倒序，最近 200 笔）。
+- **组合回测响应附带评级与评分**：`_run_portfolio_backtest` 现与单标的 `_run_backtest` 同构，返回 `grade`（`grade_portfolio_equity` 净值 5 维度口径）与 `score`（`score_strategy`），前端/REST 直接消费。
+
+### 新增（AI 解读）
+
+- **组合版 AI 解读 Prompt**（`buildPortfolioAiPrompt`，[aiPrompt.ts](web-ui/src/aiPrompt.ts)）：打包组合配置（标的清单/资金均分口径）、完整 25 项指标、净值概览、各标的表现榜（按收益降序）、可选的组合 WF/一条龙/评级段落与组合最近成交，角色设定明确「一篮子标的、资金均分」语境并要求关注标的集中度。弹窗交互（复制/下载/直接解读）抽为通用组件 `AiInterpretModal.vue`，单标的回测页与组合页共用（行为不变）。
+- **AI 解读历史上下文**：组合解读落库时携带 `kind: "portfolio"` 与标的清单，供 AI 解读历史页「去回测」引导。
+
+### 修复
+
+- **组合净值回撤口径错误**：`_build_combined_equity` 的 `drawdown` 此前为负值（`total - peak`）、`drawdown_pct` 以固定初始资金为分母——净值翻倍后回撤百分比会被放大数倍，且 EquityChart（取负显示）会把回撤画成正区域。统一为逐点峰值口径（`drawdown = peak - total`，`drawdown_pct = drawdown / peak`），与单标的 `PortfolioTracker`、`MultiStrategyEngine` 一致。
+- **组合假年化**：`annual_return` 此前直接等于 `total_return`（代码自注"简化"），现由 `PerformanceAnalyzer` 按时间长度真实年化。
+- **按标的取行情的日期列规范化**（`_normalize_bars_dt`，Web 回测路由）：真实 TDX 日线返回 int `date` 列、分钟线返回 `datetime`，而 E2E mock 返回字符串 `date`——字符串直接喂引擎会在 `StrategyDataProxy` 的 float 强转处报错，遗留 `date` 冗余列亦然。统一改名 `date`→`datetime`、字符串 coerce 成 datetime64、删除冗余列，覆盖单标的/组合/多策略三条取数路径。该问题由新增的组合页 E2E 用例揭露。
+
+### 前端
+
+- 组合页（PortfolioView）新增「附加分析」勾选区：组合级 Walk-Forward（窗口数可调）与一条龙评估，随「开始组合回测」并行运行（互不阻塞、独立错误提示）；报告区新增组合绩效指标/WF 面板/一条龙面板/组合成交明细四个区块。
+- `TradeTable` 支持可选 `showSymbol` 列；`EvaluatePanel` 支持可选 `gradeOverride`（组合口径评级）；`PortfolioResult` 类型扩展完整绩效/成交/评级/评分字段（老结果缺省兼容）。
+
+### 测试
+
+- 后端新增 17 例：组合完整指标（键全集/真年化/回撤口径/symbol 列/资金加权一致性）、组合 WF（窗口结构/聚合口径/数据不足/晚上市容错/JSON 兼容）、`evaluate_portfolio`（报告结构/买入持有超额近零/JSON 兼容）、三个新端点与组合响应附带的 grade/score/trades 的 Web 级端到端。
+- 前端：aiPrompt 新增组合版 2 例（段落随可选数据增减、防御性数字转换）；Playwright E2E 新增组合页 2 例（全流程出完整指标与成交明细、附加分析 + AI 组合 Prompt 打包断言）。
+- 全量验证：pytest 1603 通过、ruff/ruff format/mypy 全绿、node --test 4/4、Playwright 9/9。
+
+## [1.30.3] — 2026-09-03
+
+**修复「一键寻优所有策略」漏掉 35 个新策略**——v1.30.2 把内置策略从 19 个扩到 54 个，但「一键寻优」走的是另一份独立清单 `STRATEGY_PRESETS`（参数寻优预设网格）：该清单未同步登记新策略，而未登记的策略会被**静默跳过**（仅记 warning）——于是 WebUI 寻优页策略下拉能看到 54 个策略，点「一键寻优所有策略」却仍只寻优旧的 19 个、合计 174 网格点，v1.30.2 的新策略全部缺席全局排名。
+
+### 修复
+
+- **`STRATEGY_PRESETS` 补齐 35 个新策略的预设网格**（[presets.py](src/easy_tdx/backtest/strategies/presets.py)）：每个策略 1-2 个关键参数、3-9 个网格点，取值全部通过参数 schema 边界校验（跨参数约束如 `n1<n2` 的组合均有效）；`fk_reversal` 无参数策略登记为空网格（=默认参数单点）。一键寻优现覆盖 **54 个策略、合计 328 网格点**（原 19 个 / 174 点）；寻优页切换策略时的参数网格自动填充同步生效。
+- **新增防再犯回归测试**（`tests/unit/test_optimizer.py::TestStrategyPresets`，3 例）：① 注册表与预设键集**双向一致**（每个已注册策略必须有预设，预设不得指向未注册策略——今后加策略漏登记会当场爆红）；② 预设取值必须通过参数边界校验（否则寻优端点 422）；③ 单策略笛卡尔积 ≤ 200（`ParamGridOptimizer.MAX_GRID_POINTS`）。
+
+## [1.30.2] — 2026-09-03
+
+**无未来函数指标扩容 16 个 + WebUI 回测策略补齐至 54 个**——本轮从互联网主流指标库（TradingView 热榜 / StockCharts / 通达信社区）甄别出一批**计算上只引用当期及历史数据、信号不漂移**的经典指标补进 MyTT，并把回测端"有指标无策略"的缺口全部填平：此前 WebUI 回测下拉只有 19 个内置策略，34 个注册指标里近半数"看得见指标、跑不了回测"——现在**50 个注册指标、54 个内置策略一一对应**，回测页下拉、CLI、Web API 三端自动同步。
+
+### 新增（指标，MyTT V4.3，16 个函数）
+
+- **趋势/止损类**：`SUPERTREND` 超级趋势（Wilder ATR 递推锁带，带线即移动止损，2025 年 TradingView 各"最佳指标"榜单常客）、`CHANDELIER` 吊灯止损（Chuck LeBeau，HHV−K×ATR 经典离场位）、`HMA` 赫尔均线（低滞后不重绘）、`KAMA` 考夫曼自适应均线（效率比驱动：趋势市贴价、震荡市自动走平）、`ICHIMOKU` 一目均衡表（五线一云；先行带用 26 期前的值画到当前位置，只引用过去数据——**迟行带 CHIKOU 按定义引用未来收盘，仅作图示对齐，当期信号严禁使用**，已在 docstring 与注册描述中显著标注）。
+- **动量/振荡类**：`UOS` 终极指标（Larry Williams，7/14/28 三周期加权）、`CMO` 钱德动量振荡器、`TSI` 真实强度指数（双重 EMA 平滑，深回调钝化少）、`FISHER` 费雪变换（John Ehlers，拐点尖锐无钝化）。
+- **波动率/状态识别类**：`SQUEEZE` TTM 挤压动量（布林带收进肯特纳通道=挤压态 + 线性回归动量定方向）、`CHOP` 盘整指数（>61.8 震荡 / <38.2 趋势，策略侧稀缺的"行情状态开关"）、`BBP` 布林 %B 位置、`BBW` 布林带宽（收窄=变盘预警）。
+- **量能/资金类**：`AD` 累积/派发线（Marc Chaikin）、`CMF` 佳庆资金流量、`EFI` 艾尔德强力指数——补齐此前最薄弱的"资金流向"一块。
+- 明确排除项维持 v1.30.1 的口径：ZigZag 家族、`FINDHIGH/FINDLOW/BACKSET` 等通达信未来函数、需右侧 K 线确认的 Bill Williams Fractals、需要 tick 级数据的 Volume Profile 均不引入。
+
+### 新增（策略，35 个，内置策略 19 → 54）
+
+- **存量指标补策略（19 个）**：`psy_reversal` / `mtm_cross` / `roc_zero` / `expma_cross` / `dfma_cross` / `cr_reversal` / `xsii_breakout` / `obv_cross` / `vr_reversal` / `mass_cross` / `mfi_reversal` / `brar_reversal` / `asi_cross` / `zhuoyao_trend`（多周期涨幅共振）/ `bias_signal_cross` / `sar_follow` / `vwap_cross` / `aroon_cross` / `fk_reversal`。
+- **新指标首发策略（16 个）**：`supertrend`（方向翻转跟随）/ `kama_cross` / `hma_cross` / `chandelier`（通道突破进场+吊灯止损离场）/ `ichimoku_cross`（转换/基准线金叉+云层位置确认）/ `uos_reversal` / `cmo_reversal` / `tsi_cross` / `fisher_cross` / `squeeze_breakout`（挤压解除+动量方向）/ `chop_trend`（趋态开关+均线方向）/ `ad_cross` / `cmf_zero` / `efi_zero` / `bbp_reversal` / `bbw_squeeze`。全部实现 `entry_exit_masks`，走上 v1.28 的向量化快速路径。
+
+### 测试与防回归
+
+- **无未来函数前缀一致性回归（`TestNoLookahead`）**：把 200 根 K 线截断到前 120 根，16 个新指标的输出在重叠段必须与"仅用前缀数据计算"逐位一致——未来函数的致命特征是后到数据改写历史输出，任何引用 t+1 之后数据的实现当场爆红。该测试与黄金基线、向量化对拍构成三重防线。
+- 向量化对拍扩至 74 例全绿（54 策略逐 bar vs 向量化逐位一致且全部实际产生交易）；黄金基线 `backtest_metrics.json` 重生成至 54 策略全量锁定，**19 个存量策略数字一位未动**（存量行为零漂移）。`test_mytt.py` 新增 47 例数值正确性测试（范围/预热/公式口径/一字板除零保护）。
+- 文档同步：README 策略计数 19 → 54，《回测系统完全上手手册》陈旧的"18 个内置策略"修正。
+
+## [1.30.1] — 2026-09-03
+
+**彻底移除 ZIG 之字转向指标与 `zig_breakout` 策略**——ZIG 是教科书级的**未来函数**：波峰/波谷拐点只有在**其后**的走势反向走满 X% 确认转向后才会**回溯标出**，也就是说序列里每个拐点的位置都用到了"当时不可能知道"的未来信息。把它当买卖信号回测，等于允许策略在波谷那一天精准买入、在见顶前一天精准卖出——收益必然严重虚高、参数寻优必然过拟合，回测结果与实盘表现脱节，**这正是本工具最要防的失真**。
+
+### 移除
+
+- **为什么必须删，而不是加警示**——v1.29 引入时已尝试用「硬止损 + 右侧突破确认进场」两层保护对冲前视偏差，但那只能**缓解**而非**消除**：`zig_breakout` 的建仓信号"ZIG 向上启动（波谷确认）"本质上仍是偷看未来的产物，建立其上的任何回测数字、寻优选参、AI 解读都自带系统性偏差。铁证就在本项目自己的黄金基线里：`zig_breakout` 在固定样本上胜率 **100%**、总收益 **+88.2%**、夏普 **1.73**——一组完美得不像真话的数字，恰恰是前视偏差的签名（实盘信号天然滞后于回测拐点，实盘表现只会大幅劣于回测）。回测工具的生命线是"数字可信"：与其留着一个数字必然失真的指标靠 docstring 警告自律（挡不住复制粘贴），不如删掉——**宁可少一个指标，不给用户一个实盘必然打脸的完美陷阱**。
+- **移除范围（三端同步消失）**——① `MyTT.ZIG` 指标函数（`src/easy_tdx/MyTT.py`）；② 内置策略 `zig_breakout`（`backtest/strategies/builtin.py` 注册表删除后，CLI 回测、Web API、WebUI 回测策略下拉与对比页自动不再出现）；③ 参数寻优预设网格（`presets.py`）与「一键寻优所有策略」中的对应条目；④ 仓库根示例策略 `strategies/zig_breakout.py`（`--strategy-file` 入口）；⑤ 单测 `test_mytt_zig.py` / `test_zig_strategy.py` 删除，向量化对拍测试的路径依赖白名单随之清空（其余全部 19 个内置策略均可向量化对拍），黄金基线 `backtest_metrics.json` 移除 zig_breakout 条目（其余策略零漂移）；⑥ README / strategies/README / 架构文档中的相关说明。
+- **兼容性影响（有意为之）**——外部脚本 `from easy_tdx.MyTT import ZIG` 将抛 `ImportError`，引用 `zig_breakout` 的回测命令 / API 调用将报"策略不存在"：**快速失败好过静默失真**。需要之字转向类形态分析的用户，可自行基于已确认 K 线实现不含未来函数的右侧确认版本，或改用海龟突破（`turtle_breakout`）/ 唐奇安通道（`donchian`）等天然右侧的策略。
+
+## [1.29.2] — 2026-09-02
+
+**可编辑安装失效时给出友好报错**（[#58](https://github.com/handsomejustin/easy_tdx/discussions/58)）——`pip install -e .` 会在 site-packages 写入 `_editable_impl_easy_tdx.pth`（内容为仓库 `src/` 绝对路径）。仓库目录被移动/重命名/重新 clone 或该文件丢失后，`easy-tdx` 只会抛出一句无法定位的 `No module named 'easy_tdx.cli'`：`easy_tdx` 本体因 site-packages 里的 `web/dist` 命名空间碎片仍可导入，报错极具误导性（实测复现，失效态 `easy_tdx.__path__` 只剩 site-packages 碎片路径）。
 
 ### 新增
 
+- **入口守卫模块 `easy_tdx._editable_guard`**——控制台脚本入口从 `easy_tdx.cli:cli` 改为经 `main()` 转发（正常态行为完全不变）；`easy_tdx.cli` 不可导入时打印中文修复指引（失效原因说明 + `python -c "import easy_tdx; print(easy_tdx.__path__)"` 排查命令 + 免重建 venv 的修复命令 `pip uninstall easy-tdx -y && pip install -e . --no-deps` + issue 链接），退出码 1。守卫文件经 `force-include` 同时复制进 site-packages 的碎片目录——失效态下 `src/` 代码全部不可达，唯有该副本可导入，这正是守卫能"在坏掉时还活着"的关键（`__init__.py` 途径不可行：失效态解析到的是无 `__init__.py` 的命名空间碎片）。
+- 单测 `tests/unit/test_editable_guard.py`（2 例）：meta_path 阻断器模拟 `ModuleNotFoundError` → 断言提示内容与退出码；正常态断言转发调用 click 组。已本地实测三种安装形态：可编辑健康态 `--help` 正常、模拟失效态输出指引且退出码 1、wheel 安装态正常（hatchling 对包内文件 + force-include 同路径映射自动去重，guard 在 wheel 中恰好一份）。
+
+## [1.29.1] — 2026-09-02
+
+**中金所成交持仓排名采集（ccpm，独立数据源）**——散户能免费看到的**最接近"主力动向"的公开数据**：每个交易日收盘后约 16:15，中金所官网公布各期货品种「成交量 / 持买单量（多单）/ 持卖单量（空单）」各前 20 名期货公司会员排名。新增 `easy_tdx.ccpm` 模块并三端接入（CLI / Web API / WebUI），零第三方依赖（标准库 urllib）。
+
+### 新增
+
+- **核心模块 `easy_tdx.ccpm`**——抓取官网 `/sj/ccpm/{YYYYMM}/{DD}/{品种}.xml`（单文件含该品种全部合约 × 三类排名 × 各前 20 名会员）。协议逆向要点：官网 JS 的 `?id=` 仅为 0~99 随机防缓存参数可省略；非交易日返回 302→error_404，禁用 urllib 自动重定向并把 302/404 识别为「无数据」（`CcpmNoDataError`，区别于网络错误 `CcpmError`）；仅 http 可用（https 握手失败）；历史可回溯至 2012 年。`CcpmClient.get_rank()` 指定日期抓取、`latest_rank()` 自动回溯最近交易日（缺省最多回溯 15 天，覆盖春节长假）；每个交易日数据发布后不可变 → 按日落盘缓存 `~/.easy_tdx/cache/ccpm/{YYYYMMDD}/{品种}.json`（随 `EASY_TDX_CONFIG_DIR`），历史二次查询零网络，`refresh=True` 强制重抓。
+- **品种覆盖 8 个**：IF 沪深300 / IH 上证50 / IC 中证500 / IM 中证1000 股指期货 + TS/TF/T/TL 2/5/10/30 年期国债期货；品种元数据（标的 / 合约规模 / 一句话科普）集中在 `ccpm/models.py`，三端共用同一份文案。
+- **CLI `easy-tdx ccpm`**——`easy-tdx ccpm IF [--date YYYY-MM-DD] [--table] [--refresh] [--no-cache]`，品种参数支持 `all` 一次抓全部 8 个品种（实测 460 行）；`--table` 自动切换中文表头（JSON/CSV 保持英文机器友好列名）。
+- **Web API**——`GET /api/v1/ccpm/products`（品种科普元数据）+ `GET /api/v1/ccpm/rank?product=IF&date=2026-09-02`（`date` 缺省自动回溯；404=该日期非交易日或数据未发布，文案说明 16:15 发布时间；`refresh` 参数强制重抓）。
+- **WebUI「期货持仓排名」页**（行情组导航）——品种下拉（带中文名）+ 日期选择器 + 「自动取最近交易日」回溯开关 + 一键采集按钮；合约页签自动标注**主力**（=当日合计成交量最大的合约）；前 20 名合计概览 chips（多单/空单/净持仓·多−空/当日成交，红涨绿跌）；三组排名并排表格（与官网 CSV 同构），底部合计行；手动选非交易日给友好错误并可一键切回自动回溯。
+- **三段新手科普折叠帮助**（面向小白用户）：①「这是什么数据」——"(代客)"=期货公司经纪客户合计而非自营、只统计前 20 名（约占全市场六到八成）、「增减」=加仓/减仓语义；②「品种一览」——IF/IH/IC/IM 各跟踪哪个指数、国债期货=利率期货（价格与市场利率反向，期限越长越敏感）；③「多单、空单、加减仓怎么看」——多单=看涨或锁成本、空单=看跌**或**套保对冲，重点强调**排名表看不出套保还是投机，空单多 ≠ 看空市场**（股指期货空单大头常是机构套保盘），净持仓只是情绪参考，期货是零和合约全市场多空永远相等；另附页面级风险提示（期货带杠杆，亏损可超本金）。
+- **CLI/Web 测试 20 例**（`tests/unit/test_ccpm.py`，mock HTTP 零网络）：XML 长表→宽表对齐、缺单元格容错、302→无数据翻译、按日缓存命中/强制刷新、latest_rank 回溯与耗尽、品种元数据完整性、路由 200/404/422、CliRunner 三例。
+
+## [1.29.0] — 2026-09-02
+
+**借鉴社区 Fork（[swimmingaaron/easy_tdx](https://github.com/swimmingaaron/easy_tdx)）的六项实用特性**——该 Fork 自 v1.20.12 分叉后独立演化出一批好想法，本轮逐项甄别后移植其精华（剥离其单文件前端/平行后端层/硬编码个人路径等不可维护部分）：ZIG 策略、交易时段感知刷新、120 分钟 K 线、逐 bar 衍生字段、159 只核心龙头池、多 Provider LLM 直连。
+
+### 新增
+
+- **ZIG 右侧突破回补策略**（`zig_breakout`）——`MyTT` 新增 `ZIG` 之字转向指标（未来函数，拐点回溯标出；实现自 Fork 移植并补前视偏差警示文档）。策略逻辑：ZIG 波谷启动全仓买入（挂 `stop_loss_pct` 硬止损，OCO 由引擎逐 bar 监控）→ 见顶清仓并记录 HHV(N) 前高 → 收盘突破前高×(1+确认比例%) 右侧回补。ZIG 的前视偏差用「止损保护 + 右侧确认进场」两层对冲而非消除，策略 docstring 明示回测信号有前视性。因 `_breakout_level` 随持仓路径变化，不实现 `entry_exit_masks`（引擎自动走逐 bar 回放，向量化守护测试白名单放行）。同时登记寻优预设网格（zig_delta×confirm_pct=12 点）与独立策略文件 `strategies/zig_breakout.py`（供 `--strategy-file` 离线扫描）。
+- **交易时段感知的仪表盘自动刷新**——新增共享模块 `realtime/session.py`：`is_trading_time()`（窗口 09:15~11:30:30 / 13:00~15:05，含集合竞价与收盘竞价缓冲，午休排除，周一至五）+ `GET /market/session`。WebUI 市场看板的 30/60/120s 三档轮询在休市时自动暂停（状态栏三态：交易中/休市已暂停/全天候模式），每分钟重估跨边界即时切换；「仅交易时段自动刷新」开关 localStorage 持久化，手动刷新按钮不受限。后端 SSE/WS 推送本就带时段过滤（feed `_DEFAULT_SESSIONS` / streamer 降频），本次不改其既有语义。
+- **120 分钟 K 线**（`/bars?category=MIN_120`，别名 `120M`/`120MIN`）——协议无此枚举，路由层特判：优先 MAC 原生 `Period.MINS × times=120`；失败则取 2 倍 60M 相邻两根聚合（open=first / high=max / low=min / close=last / vol·amount=sum，时间取后一根，奇数根丢最旧保最新）；标准 TdxClient 回退路径受单次 800 根限制最多合成 400 根。前端周期选择器（单标的回测 / 组合回测）新增 `MIN_120` 选项。
+- **K 线逐 bar 衍生字段**——`/bars` 与 `/bars/index` 每根 bar 附带 `pre_close`（前收，首根退化为本根开盘）、`change`、`change_pct`、`amplitude_pct`（振幅%），前端无需重算；`pre_close ≤ 0.01` 按 0.01 兜底（QFQ 复权后早期价格可能为 0/负）。
+- **159 只核心龙头池**（`screen/universe.py`，数据资产取自 Fork 按东方财富全行业龙头名单整理的 `CORE_UNIVERSE`，剥离其缓存/个人路径实现）——四组分层（全球第一/国内第一/科技细分/行业冠军），`universe="core"` 接入 `screen scan` CLI、`SignalScanner` 与 `StrengthRanker`（离线 .day 扫描按名单过滤，约 3 秒扫完龙头池），`/market/strength` API 同步支持；另暴露 `GET /market/core-leaders`。
+- **全局风险提示与免责声明（Web UI）**——App 外壳底部新增常驻提示栏，覆盖全部页面（行情 / 回测 / 选股扫描 / AI 解读统一口径："仅供量化研究与学习，不构成任何投资建议或个股推荐；历史表现不代表未来，股市有风险，据此操作风险自负"）。龙头池页另加显著说明块：讲清名单含义（按东财公开资料整理的**扫描范围筛选清单**，仅描述行业地位的客观事实）与用途（`universe=core`），明确"不构成任何形式的个股推荐/买入建议/投资顾问服务，不对据此操作承担责任"。AI 解读正文（回测弹窗与历史页）均随附"AI 生成内容可能出错，仅供参考，不构成投资建议"提示。
+- **AI 解读历史 + 龙头池页面（Web UI 导航新增「AI 解读历史」「龙头池」）**——每次成功的「直接解读」自动归档到 `~/.easy_tdx/llm_history.db`（SQLite，`llm_history_store`）：提问 Prompt、解读正文、模型/耗时与当时的策略上下文（策略/参数/标的/周期/日期区间）。历史页按时间倒序展开查看，每条带「→ 去回测（带参数）」一键跳回回测页复现场景（复用寻优页的 query 预填链路）、查看提问 Prompt、删除/清空；API 为 `GET/DELETE /llm/history`。「龙头池」页展示 159 只核心龙头（搜索过滤 + 点击进个股详情，即 `universe=core` 同一名单）。另为前端路由表加兜底重定向：未注册路径（如把 API 路径当页面访问）回看板而非渲染空白。
+- **多 Provider LLM 直连 + WebUI「AI 设置」页**——新增 `easy_tdx.ai` 模块与 `/llm/*` 路由。Provider 预设 9 家：DeepSeek / 通义千问 / 智谱 GLM（bigmodel.cn）/ Kimi / MiniMax / OpenAI / Claude（Anthropic 原生协议）/ Ollama（本地免 Key）/ 自定义（任意 OpenAI 兼容网关），base_url 与模型均可覆盖。配置落盘 `~/.easy_tdx/llm.json`（随 `EASY_TDX_CONFIG_DIR`），WebUI 表单与手工编辑同一份文件、双向兼容；字段级优先级 = 文件 > 环境变量（`LLM_PROVIDER`/`LLM_API_KEY`/`LLM_BASE_URL`/`LLM_MODEL`）> 预设默认。API：GET/PUT `/llm/config`（key 脱敏回显，回传脱敏串不覆盖真 key）、POST `/llm/test`（连通性+延迟）、POST `/llm/chat`。回测页「🤖 AI 解读」在模型已配置时新增「✨ 直接解读」——把组装好的报告 Prompt 提交为**后台任务**（接入与回测同一套 `task_runner`：4 线程池 + SQLite 持久化），前端短轮询 `GET /llm/chat/tasks/{task_id}` 取结果（`POST /llm/chat/async`，202），长耗时模型调用不占 HTTP 连接、断线重连后仍可查询，按钮实时显示已耗时；配置不完整在提交期即报 400，网络/鉴权/超时错误体现在任务态 `error`（读超时文案给出「调大超时」动作，默认超时 180s 可调至 600s）。未配置模型时保持导出 Prompt 手动路径。**思考型模型空白正文防御**（实测：GLM-5.x 的 `reasoning_content` 思考链计入 max_tokens，4000 预算被整份报告的思考耗尽后 `content` 为空白——truthy 但渲染为空，状态条报成功而正文空白）：解析层对空白正文显式拦截——有思考链时报「调大 Max Tokens」的可操作错误（含当前值与 finish_reason），无思考链按格式错误上报，绝不返回空串；max_tokens 默认 4000→16000（上限即目标，按实际生成计费），前端再拦一道纯空白。零第三方依赖（标准库 urllib + `asyncio.to_thread`）。
+
+
+### 测试
+
+- 新增 6 个单测文件共 51 例：`test_mytt_zig.py`（ZIG 边界/单调/V 型/锯齿/阈值双写法）、`test_zig_strategy.py`（注册/参数校验/引擎成交/独立文件加载/预设网格）、`test_realtime_session.py`（窗口边界/午休/周末/session_info）、`test_bars_min120_derived.py`（重采样聚合/裁剪/缺列、衍生字段/兜底）、`test_screen_universe_core.py`（名单 159 只唯一性/已知龙头/core 过滤准确性）、`test_ai_llm.py`（配置文件↔环境变量优先级/脱敏/双协议请求组装/HTTP 错误包装，HTTP 层 monkeypatch 零真实网络）。
+- 黄金基线 `tests/golden/backtest_metrics.json` 重新生成：仅新增 zig_breakout 条目（5 笔交易），其余策略零漂移。
+- 新增 `test_llm_history_store.py`（6 例：倒序/上下文 JSON 往返/坏数据容忍/删除清空/limit）与异步解读自动落历史 + 失败不落库的 API 级测试。
+
+## [1.28.2] — 2026-09-02
+
+**修复指数/个股 K 线 vol 字段的三类协议语义错误**（[#64](https://github.com/handsomejustin/easy_tdx/issues/64)）——通达信服务端 K 线记录的第一个 4 字节字段（一直被当作成交量透传）的语义随周期/品种变化，此前原样返回错误数据。本轮通过逐字节拆包原始报文 + 新浪实时行情/东方财富分钟 K 三方交叉验证锁定规律后，在协议解析层（`GetIndexBarsCmd` / `GetSecurityBarsCmd` 的 `parse_response`，同步/异步客户端共用）统一修正。
+
+### 修复
+
+- **指数分钟线（MIN_1/3/5/15/30/60，含 880xxx 板块指数）vol 实为成交额/100**——报文中两个字段分别是「成交额(百元)」与「成交额(元)」，恒差 100 倍（实测比值 0.9999996~0.9999999，剩余偏差仅为 4 字节自定义浮点的解码噪声），**真实的分钟成交量根本不在报文中**（对照：上证指数 2026-09-02 15:00 的 5min bar，东财真实成交量 13,954,814 手 / 成交额 208.75 亿元，协议 f1 返回的 208,748,512 ≈ amount/100，即 issue 反馈的现场）。修复后 vol 置 **NaN**（Web API 序列化为 `null`）而非拿成交额冒充成交量；`amount` 保持成交额(元)不变。
+- **指数与个股的周/月/季/年线 vol 恰好少 100 倍**——服务端该字段为真实成交量/100（铁证：上证指数本周 8/31+9/1+9/2 三个日线 vol 合计 1,666,668,288 手，周线 f1 返回 16,666,683；浦发银行周线 2,693,885×100 = 269,388,500 vs 三日日线合计 269,388,528 股，均精确到解码噪声）。修复后 ×100 还原，与日线单位对齐（指数=手、个股=股）。日线（cat 4）与 cat 9（"日线变体"——枚举名误标为 YEAR，实测返回日线粒度数据，真年线是 cat 11）不受影响。
+- **`DataFrameResponse` 对 NaN 透传导致潜在 500**（`src/easy_tdx/web/schemas.py`）——Starlette `JSONResponse` 为 `allow_nan=False`，DataFrame 中任何 NaN（含本次指数分钟线 vol）直接抛异常返回 500。序列化统一 NaN → `null`。
+- 语义与单位已在 `get_index_bars` / `get_security_bars`（含异步版）与 `/bars`、`/bars/index` 路由 docstring（OpenAPI 文档）写明。附带发现（本轮未改行为，仅记录）：指数分时接口 `get_minute_time_data` 的 vol 列为成交额(万元)（全日合计 ≈ 日成交额/10000，个股分时则正常为股）；`KlineCategory.YEAR=9` 实为日线变体、真年线是 `YEAR_ALT=11`，`/bars?category=YEAR` 目前实际返回日线数据。
+
+### 测试
+
+- 新增 `tests/unit/test_bars_vol_semantics.py`（7 例）：指数分钟线（6 个分钟周期 ×单条/多条对齐）vol=NaN 且 amount 不变、指数与个股周/月/季/年 ×100、日线与 cat 9 原样、`DataFrameResponse` NaN→null；报文用实抓原始字节构造（`0x4D4713FE`/`0x509B87A0` 为 2026-09-02 真实字段值）。
+- 新增 `scripts/verify_issue64.py`：连真实服务器的验收脚本，输出各周期 vol/amount 及 amt/vol 比值、分钟线 f1 vs amount/100 偏差、指数分时 vol 全日合计对照，供回归复测。
+
+## [1.28.1] — 2026-09-02
+
+**Web UI 新手友好化 + AI 解读导出**——回测报告的两个「看不懂」出口：名词解释折叠帮助（新手向）与 AI 解读 Prompt 一键导出（LLM 辅助解读），另修复 Walk-Forward 窗口数据被序列化成字符串的后端 bug。
+
+### 新增
+
+- **名词解释折叠帮助**（Web UI）——Walk-Forward 样本外验证 / 一条龙评估 / 绩效指标三个报告框底部各内置「? 名词解释」按钮：默认收起、点击展开，共 33 个词条覆盖全部 25 项绩效指标与 WF / 评估术语（每窗独立开仓、盈利窗占比、连乘收益、Ulcer 指数、卡玛比率、α/β/信息比率、适配性体检等）。每条按「一句话定义 → 公式 → 细节 → 怎么看（阈值与经验法则）」组织，重点粗体亮色、阈值橙色粗体、细节细体暗色的字重层级；文案口径与后端实现逐项对齐（WF 预热区 30%、综合评分权重 50/15/10/5/20、体检 8 项 ≥75% 高适配、卡玛 = 年化收益 ÷ 最大回撤等）。新增通用组件 `HelpCollapse`（平滑展开动画；折叠态叠加 `visibility:hidden`，对无障碍树与自动化真正隐藏）与 `GlossaryList`（`**粗体**` 内联标记解析，词条数据集中 `web-ui/src/data/glossary.ts`）。
+- **AI 解读 Prompt 一键导出**（Web UI）——回测报告工具栏新增「🤖 AI 解读」：把当前报告实时组装成结构化 markdown 提示词（角色设定 + 六步解读框架 + 回测配置 + 25 项指标 + 净值概览 + WF 逐窗明细 + 一条龙评估 + 评级 + 最近 8 笔成交 + 免责），一键复制 / 下载 .md，发给任意 LLM（ChatGPT / Claude / DeepSeek / 豆包…）即可获得针对性解读。文风指令经三轮实测迭代：要求「做了十几年量化的老手朋友聊天」口吻、禁八股句式（「事实是」「总的来说」等）、优点毛病都讲、婉转不下判决书、800 字内、只引用报告已有数字，并以 **0-10 信心分**收尾（统一行动刻度：0-3 放弃 / 4-6 继续改 / 7-8 小仓试错 / 9+ 逐步加仓）。可选段落（WF / 评估 / 评级）按数据有无自动拼接，未跑不出现。生成器为纯函数 `web-ui/src/aiPrompt.ts`（仅 type-only 本地导入，node:test 可直跑）。
+- 单测 `web-ui/src/__tests__/aiPrompt.test.ts`（2 例）：25 项指标行齐全、可选段按需拼接、WF 窗口字符串值防御性转换回归锁定。
+
+### 修复
+
+- **`to_json_native` 有限 python float 被序列化成字符串**（`src/easy_tdx/backtest/types.py`）——有限 float 此前会落到末尾的 `str()` 兜底（np.float64 分支则正常转数字）；Walk-Forward 窗口字段恰好都经 `float()` 包装全部中招，REST JSON 里逐窗 `total_return` / `sharpe` / `max_drawdown` / `win_rate` 变成字符串，前端严格判型处显示 `-`（AI 解读 Prompt 逐窗数据缺失、LLM 无法引用）。修复后有限 python float 与 np.float64 同口径保持数字、NaN → None。前端 Prompt 组装同步加 `Number()` 防御性转换，兼容仍在缓存的旧任务结果。
+
+### 测试
+
+- E2E 新增 2 例：名词解释默认折叠 / 点击展开（词条与面板统计标签同名场景用类名作用域定位，规避 strict mode 冲突）、AI 弹窗内容打包断言（textarea 用 `toHaveValue` 而非 `toContainText`）。既有「盈利窗占比」「综合评分」「对比买入持有」等全局 `getByText` 断言收窄到对应容器（词条文案含同名词）。Playwright 本轮以 `PYTHONPATH=src` 对仓库后端运行，序列化修复被 E2E 真实覆盖。
+
+## [1.28.0] — 2026-09-02
+
+**深度风险报告 + 移动止损 + 黄金测试**（借鉴 [akquant](https://github.com/akfamily/akquant)）——把专业量化框架的「报告深度」与「测试 rigor」搬到散户工具上，三通道（CLI / Web API / Web UI）同步输出。同版本收录 Playwright E2E 前端测试基建与 WebSocket 实时推送联动（升级计划 P4-1 / P4-2）。
+
+### 性能
+
+- **回测引擎信号管线提速 ×12.6（ma_cross 800 根全流程 93.6ms → 7.4ms，Windows/Py3.12 实测）**——升级计划 P4 遗留项。先写基准（`scripts/bench_engine.py`，perf_counter 中位数）再优化，profile 归因打破预期：v1.25 以为瓶颈是 `_generate_signals` 的逐 bar 循环，实测 **85% 墙钟在 `OrderSimulator._find_bar_index`**（每个信号都把整列 datetime `strftime("%Y%m%d")` 一遍，46 信号×800 根 ≈ 0.78s），另 ~10% 在 `_bind_data` 的 `_datetime_to_int`（同样 strftime 全列）。三处优化（全部保持行为逐位一致）：
+  1. **向量化信号生成快速路径**：`Strategy` 新增 `entry_exit_masks()` 钩子（显式声明 entry/exit 布尔掩码，语义约定与约束写在 docstring），19 个内置策略全部实现；引擎按掩码 + 候选事件 bar 状态机一次产出信号（逐 bar 循环退化为逐事件循环），持仓估算逐行复刻 `_update_strategy_position`（含买不足 1 手的退化路径）。约束检测 `_vectorize_eligibility` 显式可测（未实现钩子 / 缠论注入 → 回退逐 bar）；`signal_path="auto|vector|loop"` 可强制指定。信号层加速 ×1.39~1.72（800 根，四策略实测）；
+  2. **OrderSimulator 日期查找表**：`_build_dt_lookup()` 每个 `simulate()` 只转一次 datetime→行号（O(信号数×bar 数) → O(bar 数)），重复日期取首个、未命中 None、object 列恒不匹配等语义与原全列扫描逐条对齐；
+  3. **`_datetime_to_int` 去 strftime**：datetime64 走 `year*10000+month*100+day` 整数算术（输出、NaT→NaN 行为与 strftime 一致），`_bind_data` 与查找表共用。
+  效果：单标的 800 根 ma_cross 全流程 **×12.6**（macd ×11.3、boll_breakout ×11.2、rsi_reversal ×11.1）；32 点网格寻优 3.0s（按基线折算）→ 231ms。对拍单测 `test_backtest_engine_vector.py`（39 例）：19 策略 × 默认/非默认参数 × warmup/极低资金/非默认费率/指标缓存，performance/trades/equity_curve/positions 逐位一致。
+- 顺带发现（未改行为，仅记录）：`wr_reversal` 的默认阈值 -80/-20 是通达信 -100~0 惯例，而 MyTT 的 WR 为 0~100 刻度——默认参数（及边界内任意合法参数）下 entry 恒 False，策略实际不产生交易；对拍用 `skip_bounds` 参数覆盖其掩码路径，语义修正另行排期。
+
+### 新增
+
+- **绩效指标 19 → 25 项**（`backtest/performance.py`）——新增 Ulcer 指数（回撤深度×持续时间综合，与 S-D 评级「持有体验」定位同频）、95% 日 VaR / CVaR（历史分位数法，尾部风险）、SQN 系统质量数（√N×单笔收益均值/标准差，>2 可用 / >4 优秀 / >6 极佳）、最大连胜 / 最大连亏（散户心理最敏感的数字）。JSON / CSV 输出自动透传；`--table` 增加「深度风险」块；Web UI 绩效表「风险」组 +3 行、「交易」组 +3 行（老结果缺键显示 `-`）。
+- **基准对比从 1 个数升级为 5 个数**（`backtest/benchmark.py`）——`evaluate_strategy` 的 `benchmark` 段在 `excess_return` 之外新增 `alpha`（年化 CAPM α，剔除基准影响后的真实超额）、`beta`（对基准敏感度，1=同涨同跌）、`information_ratio`（年化信息比率）、`tracking_error`（年化跟踪误差）。新公开函数 `compute_benchmark_comparison(strategy_curve, benchmark_curve)`。Web UI 一条龙评估卡新增 4 格对比行（α/信息比率按正负着色，β/跟踪误差中性）；CLI `--evaluate` JSON 自动携带。
+- **移动止损 + 百分比 bracket**（`backtest/engine.py` / `strategy.py`）——`buy()` 新增 akquant `place_bracket` 风格参数：`trail_stop`（自持仓期间最高收盘价回撤 N% 触发；水印在检查后更新 → 只可能次根起触发，与 next_open 语义一致、无前视）、`stop_loss_pct` / `take_profit_pct`（按信号根收盘自动换算绝对价）。止损/止盈/移动止损构成 OCO（任一触发全部失效），触发单 `source="stop"` 延迟下一根成交。
+- **黄金测试（golden tests）**（`tests/unit/test_golden_backtest.py` + `tests/golden/backtest_metrics.json`）——借鉴 akquant 的 golden 机制：19 个内置策略在固定种子（seed=20260902，400 bar）合成数据上的 11 项指标 + 4 个规则场景（固定止损 / 止盈 / 移动止损 / 百分比 bracket）的成交价与时点 + 买入持有基准 + Alpha/Beta/IR/TE，全部锁定为 JSON 基线，容差 rel=abs=1e-6（紧到抓住费率/成交时点级别的逻辑漂移，松到容忍跨平台浮点尾数）。引擎任何撮合/费率/信号逻辑的静默改动都会在此爆出。更新基线：`EASY_TDX_REGEN_GOLDEN=1 python -m pytest tests/unit/test_golden_backtest.py`。**26 例新增**。
 - **Playwright E2E 前端测试基建**（升级计划 P4-1）——web-ui 引入 `@playwright/test`（`e2e/` + `playwright.config.ts`，`npm run test:e2e`）。**mock 方案选后端合成数据而非 page.route 拦截**：`EASY_TDX_E2E_MOCK=1` 时 serve 的 lifespan 把 TDX/MAC 客户端替换为合成数据客户端（`web/e2e_mock.py`，按 (market, code) CRC32 播种的确定性随机游走，分页语义与真实 /bars 一致），回测/WF/一条龙评估/自选/策略库继续走**真实后端代码**（它们本就不依赖行情连接），SSE 由 QuoteStreamer 真轮询合成数据全链路覆盖（mock 模式下轮询降到 2s 一拍，不受交易时段限制）。用例覆盖：看板五大指数区块+SSE 价格渲染、自选增删、回测全流程（净值图/绩效表/成交记录）、「附加分析」开关（WF 逐窗柱状图+一条龙评估卡）、策略库保存；`EASY_TDX_CONFIG_DIR` 指向每轮独立临时目录（断言可写死、不污染真实 `~/.easy_tdx`）。CI frontend job 追加 E2E 步骤；`verify_ci.sh` 补 `--no-frontend` 与前端 typecheck+build+E2E 段。新增 `tests/unit/test_e2e_mock.py`（11 例）守护 mock 与真实客户端的契约。
 - **WebSocket 实时推送联动 EventBus**（升级计划 P4-2）——`/ws/realtime/{symbol}` 从「不推送数据」变为真链路：新增 `web/realtime_hub.py`（RealtimeStreamHub），订阅集合变化时按需启停 `RealtimeDataFeed`（轮询 `get_stock_quotes` → `EventBus` → 每连接独立队列 fan-out，丢最旧保最新）；**无人订阅完全停止轮询**（对齐 QuoteStreamer 节能语义）；去重后标的上限 80；推送帧 `{type:"tick", symbol, market, code, price, volume, ts, open, high, low, pre_close, amount, name}`，30s 空闲 `ping` 心跳，客户端可 `subscribe`/`unsubscribe` 动态增删。端点重写为「单一写者泵」模型（全部出站帧经队列串行，杜绝并发 send 交错）。**前端接入选择只写文档不上组件**：看板/自选实时刷新已由 SSE `/stream/quotes`（全量快照、单连接共享）承担，WS 定位是按需单标的 tick（实时策略信号预留口），双通道同时拉同样行情属冗余——协议 + 自动重连/心跳容忍代码骨架落 `docs/api_reference.md` 与 README（「未联动」警示已撤）。新增 `scripts/ws_smoke.py` 手动冒烟（mock 模式随时可跑，实测可见 tick 帧与动态订阅确认）。环境变量 `EASY_TDX_WS_INTERVAL` 可调轮询间隔。
 

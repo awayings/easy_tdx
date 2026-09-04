@@ -6,6 +6,7 @@
 import { computed, nextTick, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 
+import AiInterpretModal from '../components/AiInterpretModal.vue'
 import EquityChart from '../components/EquityChart.vue'
 import EvaluatePanel from '../components/EvaluatePanel.vue'
 import GradeDetails from '../components/GradeDetails.vue'
@@ -17,7 +18,8 @@ import TradeTable from '../components/TradeTable.vue'
 import WalkForwardPanel from '../components/WalkForwardPanel.vue'
 import { formatError, saveStrategy } from '../api'
 import { detectMarket } from '../market'
-import { gradePerformance } from '../grading'
+import { GRADE_META, gradePerformance } from '../grading'
+import { buildAiPrompt } from '../aiPrompt'
 import type { Category, ExecutionMode } from '../types'
 import { useBacktestStore } from '../stores/backtest'
 
@@ -199,6 +201,51 @@ async function onSave() {
     saving.value = false
   }
 }
+
+// ── AI 解读 Prompt（把当前报告组装成提示词，发给任意 LLM 解读）──────────────
+// 弹窗交互（复制/下载/直接解读）抽在 AiInterpretModal 通用组件里，
+// 与组合回测页共用；这里只负责实时组装 Prompt 与策略上下文。
+const showAiModal = ref(false)
+
+/** 实时组装：附加分析（WF/评估）跑完后内容自动变全 */
+const aiPromptText = computed(() => {
+  if (!store.result) return ''
+  return buildAiPrompt({
+    symbol: fullSymbol(code.value),
+    category: category.value,
+    startDate: startDate.value,
+    endDate: endDate.value,
+    bars: store.ohlcv.length,
+    strategyLabel: strategyLabel.value,
+    params: params.value,
+    cash: cash.value,
+    commission: commission.value,
+    slippage: slippage.value,
+    execution: execution.value,
+    result: store.result,
+    wf: store.wfResult,
+    evaluate: store.evaluateResult,
+    grade: grade.value,
+    gradeHint: grade.value ? GRADE_META[grade.value.grade].hint : undefined,
+  })
+})
+
+/** 随解读落历史库的策略上下文（AI 解读历史页「去回测」引导用） */
+const aiContext = computed(() => ({
+  strategy: strategy.value,
+  strategy_label: strategyLabel.value,
+  symbol: code.value,
+  category: category.value,
+  params: { ...params.value },
+  start_date: startDate.value,
+  end_date: endDate.value,
+}))
+
+const aiTip = computed(() =>
+  wfEnabled.value || evaluateEnabled.value
+    ? '建议等附加分析跑完再发，Walk-Forward / 一条龙评估的数据会一并打包。'
+    : undefined,
+)
 </script>
 
 <template>
@@ -298,6 +345,7 @@ async function onSave() {
       <div v-if="store.result" class="report-content">
         <div class="result-toolbar">
           <button class="ghost" @click="openSaveForm">💾 保存策略</button>
+          <button class="ghost" @click="showAiModal = true">🤖 AI 解读</button>
           <span v-if="saveMsg" class="save-msg">{{ saveMsg }}</span>
         </div>
 
@@ -383,6 +431,16 @@ async function onSave() {
         </div>
       </div>
     </div>
+
+    <!-- AI 解读 Prompt 对话框（单标的/组合通用组件） -->
+    <AiInterpretModal
+      v-if="showAiModal && store.result"
+      :prompt="aiPromptText"
+      :filename="`AI解读_${code}_${strategy}.md`"
+      :context="aiContext"
+      :tip="aiTip"
+      @close="showAiModal = false"
+    />
   </div>
 </template>
 

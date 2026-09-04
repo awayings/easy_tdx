@@ -25,9 +25,14 @@ class Signal:
         price: 限价（None = 市价单）
         stop_loss: 止损价（None = 不设置）
         take_profit: 止盈价（None = 不设置）
+        trail_stop: 移动止损百分比（如 0.08 = 自持仓期间最高收盘价回撤
+            8% 触发，None = 不设置）。与 ``stop_loss`` 同时设置时固定价优先。
         source: 信号来源。"strategy"=策略产生（默认）；
             "stop"=止损/止盈触发。stop 来源的信号不在信号 bar 当根成交，
             而是延迟到下一根开盘（消除用当根 intrabar 触发价成交的前视偏差）。
+
+    ``stop_loss`` / ``take_profit`` / ``trail_stop`` 三者构成 OCO
+    （one-cancels-other）：任一触发即全部失效，由引擎逐 bar 监控。
     """
 
     datetime: int
@@ -36,6 +41,7 @@ class Signal:
     price: float | None = None
     stop_loss: float | None = None
     take_profit: float | None = None
+    trail_stop: float | None = None
     source: str = "strategy"
 
 
@@ -117,8 +123,11 @@ def to_json_native(obj: Any) -> Any:
         return f if math.isfinite(f) else None
     if isinstance(obj, np.bool_):
         return bool(obj)
-    if isinstance(obj, float) and not math.isfinite(obj):
-        return None
+    if isinstance(obj, float):
+        # 有限 python float 保持数字（与 np.float64 分支同口径）。
+        # 此前有限 float 会落到末尾的 str() 兜底，导致 WF 窗口等
+        # 经 float() 包装的字段被序列化成字符串（前端严格判型时显示 "-"）。
+        return obj if math.isfinite(obj) else None
     if obj is None or isinstance(obj, str | int | bool):
         return obj
     if hasattr(obj, "isoformat"):

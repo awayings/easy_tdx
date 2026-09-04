@@ -540,6 +540,9 @@ class TdxClient:
                 上午最后一根 5min 标 11:25、下午第一根标 13:00）；``"end"`` = bar 右端点
                 （= 开始 + 周期时长，与 Tushare/同花顺对齐，上午最后一根标 11:30）。
                 仅对分钟级周期生效；日线及以上不受影响。
+
+        vol 单位：分钟线/日线为成交量(股)；周/月/季/年线服务端原样返回的是
+        真实成交量/100，解析层已 ×100 还原为股。
         """
         cmd = GetSecurityBarsCmd(market, code, category, start, count)
         bars = self._execute(cmd)
@@ -575,6 +578,11 @@ class TdxClient:
 
         Args:
             bar_time: 见 :meth:`get_security_bars`，分钟级周期时间戳可对齐 Tushare 右端点。
+
+        vol 单位：日线与周/月/季/年线为成交量(手)（周及以上周期服务端原样
+        返回真实成交量/100，解析层已 ×100 还原）；**分钟线协议不提供成交量**
+        （报文中该字段实为成交额/100，与 amount 冗余），vol 为 NaN——请勿将
+        其当作成交量使用，Web API 中序列化为 ``null``。
         """
         cmd = GetIndexBarsCmd(market, code, category, start, count)
         bars = self._execute(cmd)
@@ -600,10 +608,47 @@ class TdxClient:
     # ------------------------------------------------------------------ #
 
     def get_minute_time_data(self, market: Market, code: str) -> pd.DataFrame:
-        """获取今日分时数据（240条，走历史分时接口）。"""
+        """获取最近交易日分时数据（个股与指数通用）。
+
+        历史分时接口盘中对"当日"即返回已成交分钟（实测 12:33 午休时返回
+        上午 120 条），收盘后为全天 240 条——先查今天，无数据（盘前/周末/
+        节假日）回退最近交易日（最新日 K 锚定，指数自动走指数 K 线命令）。
+        实时分时命令（0x0c1b）响应每条 2 字段而解析器按 3 字段读，必然
+        错位出负量/天价乱码，不使用。
+        """
         today = _today_in_shanghai()
-        bars = self._execute(GetHistoryMinuteTimeDataCmd(market, code, today))
-        return _add_minute_datetime(_to_df(bars), today)
+        latest = self._latest_trade_date(market, code)
+        for date in dict.fromkeys((today, latest)):
+            if date is None:
+                continue
+            bars = self._execute(GetHistoryMinuteTimeDataCmd(market, code, date))
+            if bars:
+                return _add_minute_datetime(_to_df(bars), date)
+        return _add_minute_datetime(_to_df([]), today)
+
+    def _latest_trade_date(self, market: Market, code: str) -> int | None:
+        """最新一根日 K 的日期（YYYYMMDD），无日 K 数据（如未上市新股）返回 None。
+
+        指数/板块指数必须走指数 K 线命令（响应每条多 4 字节），用个股命令解析
+        会得到乱码日期（如 116785687）。先按个股命令查询并校验日期落位
+        [19900101, 今天]，不合法再换指数命令重查，避免依赖代码前缀规则。
+        """
+        today = _today_in_shanghai()
+        for cmd in (
+            GetSecurityBarsCmd(market, code, KlineCategory.DAY, 0, 2),
+            GetIndexBarsCmd(market, code, KlineCategory.DAY, 0, 2),
+        ):
+            bars = self._execute(cmd)
+            # 空数据故障转移：与 get_security_bars 同源（部分服务器对 K 线返回空 body；
+            # 指数/880 板块指数也并非所有服务器都提供）
+            if not bars and self._auto_reconnect:
+                bars = self._find_host_returning_data(cmd)
+            if not bars:
+                continue
+            d = bars[-1].year * 10000 + bars[-1].month * 100 + bars[-1].day
+            if 19900101 <= d <= today:
+                return d
+        return None
 
     def get_history_minute_time_data(self, market: Market, code: str, date: int) -> pd.DataFrame:
         """获取历史某日分时数据（date: YYYYMMDD）。"""
@@ -1330,9 +1375,33 @@ class AsyncTdxClient(AsyncHeartbeatMixin):
         return _merge_bar_datetime(df, not is_intraday)
 
     async def get_minute_time_data(self, market: Market, code: str) -> pd.DataFrame:
+        """获取最近交易日分时数据，语义见同步版 :meth:`get_minute_time_data`。"""
         today = _today_in_shanghai()
-        bars = await self._execute(GetHistoryMinuteTimeDataCmd(market, code, today))
-        return _add_minute_datetime(_to_df(bars), today)
+        latest = await self._latest_trade_date(market, code)
+        for date in dict.fromkeys((today, latest)):
+            if date is None:
+                continue
+            bars = await self._execute(GetHistoryMinuteTimeDataCmd(market, code, date))
+            if bars:
+                return _add_minute_datetime(_to_df(bars), date)
+        return _add_minute_datetime(_to_df([]), today)
+
+    async def _latest_trade_date(self, market: Market, code: str) -> int | None:
+        """最新一根日 K 的日期（YYYYMMDD），语义见同步版 :meth:`_latest_trade_date`。"""
+        today = _today_in_shanghai()
+        for cmd in (
+            GetSecurityBarsCmd(market, code, KlineCategory.DAY, 0, 2),
+            GetIndexBarsCmd(market, code, KlineCategory.DAY, 0, 2),
+        ):
+            bars = await self._execute(cmd)
+            if not bars and self._auto_reconnect:
+                bars = await self._find_host_returning_data(cmd)
+            if not bars:
+                continue
+            d = bars[-1].year * 10000 + bars[-1].month * 100 + bars[-1].day
+            if 19900101 <= d <= today:
+                return d
+        return None
 
     async def get_history_minute_time_data(
         self, market: Market, code: str, date: int

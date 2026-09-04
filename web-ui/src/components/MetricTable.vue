@@ -1,9 +1,13 @@
 <script setup lang="ts">
-// 19 项绩效指标表。按金融惯例格式化：比率类→百分比，保留小数。
+// 25 项绩效指标表。按金融惯例格式化：比率类→百分比，保留小数。
+// v1.28 新增深度风险指标（Ulcer/VaR/CVaR/SQN/连胜连亏），老结果缺键时显示 '-'。
 
 import { computed } from 'vue'
 
+import { metricsGlossary } from '../data/glossary'
 import type { Performance } from '../types'
+import GlossaryList from './GlossaryList.vue'
+import HelpCollapse from './HelpCollapse.vue'
 
 const props = defineProps<{
   perf: Performance
@@ -27,6 +31,9 @@ const METRICS: MetricRow[] = [
   { key: 'max_drawdown', label: '最大回撤', format: 'percent', group: '风险' },
   { key: 'max_dd_duration', label: '回撤持续', format: 'days', group: '风险' },
   { key: 'volatility', label: '波动率', format: 'percent', group: '风险' },
+  { key: 'ulcer_index', label: 'Ulcer 指数', format: 'percent', group: '风险' },
+  { key: 'var_95', label: '日 VaR (95%)', format: 'percent', group: '风险' },
+  { key: 'cvar_95', label: '日 CVaR (95%)', format: 'percent', group: '风险' },
   { key: 'total_trades', label: '总交易数', format: 'int', group: '交易' },
   { key: 'win_trades', label: '盈利次数', format: 'int', group: '交易' },
   { key: 'lose_trades', label: '亏损次数', format: 'int', group: '交易' },
@@ -37,11 +44,14 @@ const METRICS: MetricRow[] = [
   { key: 'max_win', label: '最大盈利', format: 'percent', group: '交易' },
   { key: 'max_loss', label: '最大亏损', format: 'percent', group: '交易' },
   { key: 'avg_holding_days', label: '平均持仓天数', format: 'ratio', group: '交易' },
+  { key: 'sqn', label: 'SQN 系统质量', format: 'ratio', group: '交易' },
+  { key: 'max_consecutive_wins', label: '最大连胜', format: 'int', group: '交易' },
+  { key: 'max_consecutive_losses', label: '最大连亏', format: 'int', group: '交易' },
   { key: 'rejected_trades', label: '拒单数', format: 'int', group: '交易' },
 ]
 
-function formatVal(row: MetricRow, v: number): string {
-  if (!Number.isFinite(v)) return '-'
+function formatVal(row: MetricRow, v: number | undefined): string {
+  if (v === undefined || v === null || !Number.isFinite(v)) return '-'
   if (row.format === 'percent') return `${(v * 100).toFixed(2)}%`
   if (row.format === 'int') return String(Math.round(v))
   if (row.format === 'days') return `${v.toFixed(0)} 天`
@@ -78,22 +88,32 @@ function valueClass(row: MetricRow): string {
 </script>
 
 <template>
-  <div class="metric-grid">
-    <div v-for="[group, rows] in groups" :key="group" class="metric-group">
-      <h4 class="group-title">{{ group }}</h4>
-      <div class="metric-rows">
-        <div v-for="row in rows" :key="row.key" class="metric-row">
-          <span class="metric-label">{{ row.label }}</span>
-          <span class="metric-value" :class="valueClass(row)">
-            {{ formatVal(row, perf[row.key]) }}
-          </span>
+  <div class="metric-wrap">
+    <div class="metric-grid">
+      <div v-for="[group, rows] in groups" :key="group" class="metric-group">
+        <h4 class="group-title">{{ group }}</h4>
+        <div class="metric-rows">
+          <div v-for="row in rows" :key="row.key" class="metric-row">
+            <span class="metric-label">{{ row.label }}</span>
+            <span class="metric-value" :class="valueClass(row)">
+              {{ formatVal(row, perf[row.key]) }}
+            </span>
+          </div>
         </div>
       </div>
     </div>
+    <!-- 名词解释（默认折叠，新手向）：每个指标是什么、怎么算、怎么看 -->
+    <HelpCollapse label="名词解释：夏普 / 卡玛 / Ulcer / VaR / SQN…">
+      <GlossaryList :sections="metricsGlossary" />
+    </HelpCollapse>
   </div>
 </template>
 
 <style scoped>
+.metric-wrap {
+  display: flex;
+  flex-direction: column;
+}
 .metric-grid {
   display: flex;
   gap: 20px;

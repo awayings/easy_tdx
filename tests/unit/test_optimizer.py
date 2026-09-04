@@ -166,3 +166,107 @@ class TestParamGridOptimizer:
         )
         with pytest.raises(KeyError):
             opt.run()
+
+
+class TestStrategyPresets:
+    """预设网格与策略注册表的一致性。
+
+    「一键寻优所有策略」只遍历 STRATEGY_PRESETS（backtest.py optimize-all），
+    未登记的策略会被静默跳过——v1.30.2 曾因此只寻优 19/54 个策略。
+    这里双向锁定：每个已注册策略必须有预设，且网格合法。
+    """
+
+    def test_every_registered_strategy_has_preset(self) -> None:
+        """注册表与 STRATEGY_PRESETS 键集一一对应（双向：不多不少）。"""
+        from easy_tdx.backtest.strategies import (
+            builtin,  # noqa: F401  # 触发注册
+            get_registry,
+        )
+        from easy_tdx.backtest.strategies.presets import STRATEGY_PRESETS
+
+        names = set(get_registry().names())
+        missing = names - set(STRATEGY_PRESETS)
+        extra = set(STRATEGY_PRESETS) - names
+        assert not missing, f"这些策略无预设网格，会被一键寻优静默跳过: {sorted(missing)}"
+        assert not extra, f"这些预设指向未注册的策略: {sorted(extra)}"
+
+    def test_preset_values_within_param_bounds(self) -> None:
+        """预设取值必须在参数 schema 边界内（否则寻优端点 422）。"""
+        from easy_tdx.backtest.strategies import (
+            builtin,  # noqa: F401  # 触发注册
+            get_registry,
+        )
+        from easy_tdx.backtest.strategies.presets import STRATEGY_PRESETS
+
+        registry = get_registry()
+        for name, grid in STRATEGY_PRESETS.items():
+            params = {p.name: p for p in registry.get(name).params}
+            for pname, values in grid.items():
+                assert pname in params, f"{name}: 预设参数 {pname} 不在 schema 中"
+                for v in values:
+                    params[pname].validate(v)  # 越界抛 ValueError
+
+    def test_preset_grid_size_within_limit(self) -> None:
+        """单策略笛卡尔积 ≤ 200（ParamGridOptimizer.MAX_GRID_POINTS）。"""
+        import math
+
+        from easy_tdx.backtest.strategies.presets import STRATEGY_PRESETS
+
+        for name, grid in STRATEGY_PRESETS.items():
+            size = math.prod(len(v) for v in grid.values()) if grid else 1
+            assert size <= 200, f"{name}: 预设网格 {size} 点超上限"
+
+
+class TestOptimizeAllStrategies:
+    """一键寻优所有内置策略."""
+
+    def test_ranking_sorted_and_labeled(self) -> None:
+        """排名按 total_return 降序，best 是 ranking[0]，附中文 label。"""
+        from easy_tdx.backtest.optimizer import optimize_all_strategies
+
+        presets = {
+            "ma_cross": {"fast": [5, 10], "slow": [20, 30]},
+            "donchian": {"n": [10, 20]},
+        }
+        report = optimize_all_strategies(_make_df(), presets=presets)
+        assert report["skipped"] == []
+        assert report["total_grid_points"] == sum(r["grid_points"] for r in report["ranking"])
+        returns = [r["total_return"] for r in report["ranking"]]
+        assert returns == sorted(returns, reverse=True)
+        assert report["best"] == report["ranking"][0]
+        for r in report["ranking"]:
+            assert r["strategy_label"]
+            assert set(r) >= {
+                "strategy",
+                "strategy_label",
+                "params",
+                "total_return",
+                "sharpe",
+                "max_drawdown",
+                "total_trades",
+                "win_rate",
+                "profit_factor",
+                "grid_points",
+            }
+
+    def test_unregistered_preset_skipped(self) -> None:
+        """预设里指向未注册策略的条目应进 skipped，不中断整体寻优。"""
+        from easy_tdx.backtest.optimizer import optimize_all_strategies
+
+        presets = {
+            "ma_cross": {"fast": [5], "slow": [20]},
+            "no_such_strat": {"n": [10]},
+        }
+        report = optimize_all_strategies(_make_df(), presets=presets)
+        assert report["skipped"] == ["no_such_strat"]
+        assert [r["strategy"] for r in report["ranking"]] == ["ma_cross"]
+
+    def test_json_native_values(self) -> None:
+        """结果应为 JSON 原生类型（可直供 CLI/REST 序列化）。"""
+        import json
+
+        from easy_tdx.backtest.optimizer import optimize_all_strategies
+
+        presets = {"ma_cross": {"fast": [5, 10], "slow": [20]}}
+        report = optimize_all_strategies(_make_df(), presets=presets)
+        json.dumps(report, allow_nan=False)  # NaN/Inf 抛 ValueError
