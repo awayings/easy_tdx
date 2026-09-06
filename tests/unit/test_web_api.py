@@ -198,6 +198,28 @@ def test_realtime_router_endpoints():
 
 
 # ---------------------------------------------------------------------------
+# Meta endpoint（WebUI 品牌区版本号展示）
+# ---------------------------------------------------------------------------
+
+
+def test_meta_endpoint_returns_version():
+    """GET /api/v1/meta 应返回 version 字段（已安装时为语义化版本）。"""
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+
+    from easy_tdx.web import create_app
+
+    client = TestClient(create_app())
+    resp = client.get("/api/v1/meta")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert set(body.keys()) == {"version"}
+    assert isinstance(body["version"], str)
+    # 本测试环境下包已安装（pip install -e .），应能取到版本号
+    assert body["version"] != ""
+
+
+# ---------------------------------------------------------------------------
 # Task 10: CLI serve command
 # ---------------------------------------------------------------------------
 

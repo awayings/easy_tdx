@@ -1,12 +1,19 @@
 <script setup lang="ts">
 // 根组件：侧边栏终端外壳 + 路由出口。
 // 布局借鉴专业看盘终端（侧边栏分组导航 + 底部实时连接状态徽标）。
-import { onMounted } from 'vue'
+import { onMounted, ref } from 'vue'
 
+import { fetchMeta } from './api'
 import { useQuoteStore } from './stores/quotes'
 
 const quoteStore = useQuoteStore()
-onMounted(() => quoteStore.connect())
+
+// 应用版本号（GET /meta），品牌区展示；取不到（旧后端/源码未装包）则不显示
+const appVersion = ref('')
+onMounted(async () => {
+  quoteStore.connect()
+  appVersion.value = (await fetchMeta()).version
+})
 
 const sseLabel: Record<string, string> = {
   connecting: '连接中',
@@ -21,7 +28,10 @@ const sseLabel: Record<string, string> = {
       <aside class="sidebar">
         <div class="brand">
           <span class="brand-name">easy-tdx</span>
-          <span class="brand-sub">行情终端</span>
+          <span class="brand-sub">
+            行情终端
+            <span v-if="appVersion" class="brand-ver">v{{ appVersion }}</span>
+          </span>
         </div>
         <nav class="side-nav">
           <div class="nav-group">行情</div>
@@ -108,6 +118,12 @@ const sseLabel: Record<string, string> = {
   margin-top: 2px;
   font-size: 11px;
   color: var(--text-dim);
+}
+.brand-ver {
+  margin-left: 4px;
+  font-size: 10px;
+  opacity: 0.75;
+  font-variant-numeric: tabular-nums;
 }
 .side-nav {
   flex: 1;

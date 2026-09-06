@@ -61,9 +61,30 @@ class SwitchResponse(BaseModel):
     message: str
 
 
+class MetaResponse(BaseModel):
+    """GET /meta 的响应。"""
+
+    version: str
+
+
 # --------------------------------------------------------------------------- #
 # Routes
 # --------------------------------------------------------------------------- #
+
+
+@router.get("/meta", response_model=MetaResponse)
+async def get_meta() -> MetaResponse:
+    """应用元信息：版本号（WebUI 左上角展示）。
+
+    源码运行未装包元数据（importlib.metadata 不可用）时留空，前端不显示。
+    """
+    try:
+        from importlib.metadata import version
+
+        v: str = version("easy-tdx")
+    except Exception:  # noqa: BLE001 — 元数据缺失属正常场景，留空即可
+        v = ""
+    return MetaResponse(version=v)
 
 
 @router.get("/server/hosts", response_model=HostListResponse)

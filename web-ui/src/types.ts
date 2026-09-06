@@ -455,6 +455,12 @@ export interface ServerSwitchResult {
   message: string
 }
 
+/** GET /meta 的响应：应用元信息（版本号，WebUI 品牌区展示）。 */
+export interface AppMeta {
+  /** 语义化版本（如 "1.32.5"）；源码运行元数据缺失时为空串 */
+  version: string
+}
+
 // ── 行情终端：实时五档（SSE / POST /api/v1/security/quotes） ─────────────────
 
 /** 单只标的实时五档行情（后端 SecurityQuote 白名单投影，SSE 与 REST 同构）。 */

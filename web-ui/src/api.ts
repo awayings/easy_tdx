@@ -3,6 +3,7 @@
 
 import type {
   ApiError,
+  AppMeta,
   BacktestRequest,
   BacktestResult,
   Bar,
@@ -453,6 +454,17 @@ export async function switchServerHost(host: string): Promise<ServerSwitchResult
   })
   if (!resp.ok) await throwError(resp)
   return (await resp.json()) as ServerSwitchResult
+}
+
+/** 应用元信息（版本号，品牌区展示）。失败返回空串，由调用方决定是否显示。 */
+export async function fetchMeta(): Promise<AppMeta> {
+  try {
+    const resp = await fetch(`${BASE}/meta`)
+    if (!resp.ok) return { version: '' }
+    return (await resp.json()) as AppMeta
+  } catch {
+    return { version: '' }
+  }
 }
 
 // ── 行情终端 ────────────────────────────────────────────────────────────────
