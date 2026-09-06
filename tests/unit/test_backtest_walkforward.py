@@ -174,3 +174,100 @@ def test_wf_auto_fes_passed_through():
     assert wf_engine._engine_kwargs["auto_fees"] is True
     wf = wf_engine.run(_trend_df(300))
     assert len(wf.windows) == 3
+
+
+# ── 回归：窗口绩效口径 / 聚合方向 / 切窗下限 / 失败日志 / int 日期 ────────────
+
+
+def test_wf_window_metrics_exclude_context_bars():
+    """上下文只做指标预热：窗口绩效指标不随 context_bars 变化。
+
+    旧码把 context 恒定现金段一并喂给 PerformanceAnalyzer，sharpe/年化/波动
+    被稀释（同窗 total_return 相同而 sharpe 相差近一倍）。
+    """
+    df = _trend_df(500)
+    wf0 = WalkForwardEngine(_BuyFirstBar, n_windows=5, warmup_ratio=0.3, context_bars=0).run(df)
+    wf60 = WalkForwardEngine(_BuyFirstBar, n_windows=5, warmup_ratio=0.3, context_bars=60).run(df)
+    assert len(wf0.windows) == len(wf60.windows) == 5
+    for w0, w60 in zip(wf0.windows, wf60.windows):
+        assert w0.total_return == pytest.approx(w60.total_return)
+        assert w0.sharpe == pytest.approx(w60.sharpe)
+        assert w0.max_drawdown == pytest.approx(w60.max_drawdown)
+        assert w0.performance["annual_return"] == pytest.approx(w60.performance["annual_return"])
+        assert w0.performance["volatility"] == pytest.approx(w60.performance["volatility"])
+
+
+def test_wf_worst_drawdown_is_max_not_min():
+    """worst_drawdown 应取各窗最深回撤（max）；旧码 min 取成最浅回撤。"""
+    from easy_tdx.backtest.walkforward import WalkForwardResult, WalkForwardWindow
+
+    result = WalkForwardResult(n_windows=3, warmup_ratio=0.3)
+    for i, dd in enumerate((0.05, 0.40, 0.11)):
+        result.windows.append(
+            WalkForwardWindow(
+                index=i,
+                start="2024-01-01",
+                end="2024-02-01",
+                bars=20,
+                total_return=0.01,
+                sharpe=1.0,
+                max_drawdown=dd,
+                total_trades=2,
+                win_rate=0.5,
+            )
+        )
+    WalkForwardEngine._aggregate(result)
+    assert result.worst_drawdown == pytest.approx(0.40)
+
+
+def test_wf_windows_below_min_bars_skipped():
+    """单窗实际 bar 数 < 20 时跳过（与 docstring「每窗 ≥ 20 根」口径一致）。"""
+    wf = WalkForwardEngine(_BuyFirstBar, n_windows=9).run(_trend_df(220))
+    assert wf.windows == []
+
+
+class _BoomStrategy(Strategy):
+    """init 即抛错：单窗失败应记 warning 而非静默跳过。"""
+
+    def init(self) -> None:
+        raise RuntimeError("boom")
+
+    def next(self) -> None:
+        pass
+
+
+def test_wf_window_failure_logs_warning(caplog):
+    """单窗回测异常记 warning（含窗号与异常摘要），不拖垮整组。"""
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="easy_tdx.backtest.walkforward"):
+        wf = WalkForwardEngine(_BoomStrategy, n_windows=3).run(_trend_df(300))
+    assert wf.windows == []
+    msgs = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert any("第 0 窗" in m and "boom" in m for m in msgs), msgs
+
+
+def test_wf_int_yyyymmdd_date_column_window_labels():
+    """datetime 为 int YYYYMMDD（TDX 日线原样）时窗口起止日期正确。
+
+    旧码 pd.Timestamp(int) 按纳秒换算，窗口日期全变 1970-01-01。
+    """
+    n = 300
+    dates = pd.date_range("2023-01-02", periods=n, freq="B")
+    close = 10.0 * np.linspace(1.0, 2.0, n)
+    df = pd.DataFrame(
+        {
+            "datetime": dates.strftime("%Y%m%d").astype(int),
+            "open": close * 0.999,
+            "high": close * 1.01,
+            "low": close * 0.99,
+            "close": close,
+            "vol": 1000.0,
+        }
+    )
+    wf = WalkForwardEngine(_BuyFirstBar, n_windows=3, context_bars=10).run(df)
+    assert len(wf.windows) == 3
+    eval_start = int(n * 0.3)
+    assert wf.windows[0].start == dates[eval_start].strftime("%Y-%m-%d")
+    assert wf.windows[0].end == dates[eval_start + (n - eval_start) // 3 - 1].strftime("%Y-%m-%d")
+    assert not wf.windows[0].start.startswith("1970")

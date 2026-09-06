@@ -8,14 +8,19 @@
 from __future__ import annotations
 
 import asyncio
+from typing import Annotated
 
 from fastapi import APIRouter, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, StringConstraints
 
 from easy_tdx.config import get_best_host, get_known_hosts, get_port, save_best_host
 from easy_tdx.transport.sync import ping_all
 
 router = APIRouter(tags=["server"])
+
+# 单项 host 长度上限（域名合法最大 253 字符）；列表项数上限防被当作
+# 无限制的内网扫描跳板。
+HostStr = Annotated[str, StringConstraints(max_length=253)]
 
 
 # --------------------------------------------------------------------------- #
@@ -41,10 +46,16 @@ class HostListResponse(BaseModel):
 
 
 class ServerTestRequest(BaseModel):
-    """POST /server/test 的请求。"""
+    """POST /server/test 的请求体。
 
-    hosts: list[str] | None = None  # None = 测全部候选
-    timeout: float = 5.0
+    ``timeout`` 限 0.5~30s（to_thread 内的同步 ping 无中断手段，无上界的
+    超时会长期占住线程池线程）；``hosts`` 限 50 项、单项 ≤253 字符。
+    """
+
+    hosts: list[HostStr] | None = Field(
+        default=None, max_length=50, description="待测主机列表；None = 测全部候选"
+    )
+    timeout: float = Field(default=5.0, ge=0.5, le=30.0, description="单主机连接超时（秒）")
 
 
 class ServerSwitchRequest(BaseModel):

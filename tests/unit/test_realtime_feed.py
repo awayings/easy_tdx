@@ -332,3 +332,23 @@ class TestStopFlag:
 
         await asyncio.wait_for(feed._run_sync_loop(client, None), timeout=2.0)
         assert client.calls == []
+
+    async def test_restart_after_stop_runs_again(self) -> None:
+        """start→stop→start：停止请求一次性消费，实例可再次启动。
+
+        回归：旧实现 _stop_requested 只置位不复位——stop 后再次 run_async
+        会静默立即返回（假启动），同一实例永久失效。
+        """
+        bus = EventBus()
+        client = AsyncMockClient([_sample_quotes_df()])
+        feed = RealtimeDataFeed(bus=bus, symbols=[(0, "000001")], sessions=(), interval=0.1)
+
+        await feed.run_async(client, max_iterations=1)
+        assert len(client.calls) == 1
+
+        feed.stop()
+        await feed.run_async(client, max_iterations=1)  # 消费停止请求：启动即退出
+        assert len(client.calls) == 1
+
+        await feed.run_async(client, max_iterations=1)  # 再次启动应正常轮询
+        assert len(client.calls) == 2

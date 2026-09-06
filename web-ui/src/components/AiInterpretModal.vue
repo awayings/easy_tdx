@@ -2,7 +2,7 @@
 // AI 解读弹窗（单标的/组合回测通用）：Prompt 预览 + 复制/下载 + 一键直接解读。
 // Prompt 由父组件实时组装传入（附加分析跑完内容自动变全），本组件只管交互；
 // 直接解读走后端 LLM 后台任务（配置见「AI 设置」页），解读记录旁路落历史库。
-import { onMounted, ref, watch } from 'vue'
+import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
 import { formatError, fetchLlmConfig, runLlmChatWithPolling } from '../api'
 import type { LlmChatContext, LlmChatResult } from '../types'
@@ -28,6 +28,8 @@ const aiRunning = ref(false)
 const aiElapsed = ref(0)
 const aiReply = ref('')
 let aiTimer = 0
+/** 卸载时中止后台轮询（runLlmChatWithPolling 检查 signal 立即退出）。 */
+let abortCtrl: AbortController | null = null
 
 onMounted(() => {
   // 打开时探测 LLM 是否已配置（失败静默——导出 Prompt 的老路径不依赖后端）
@@ -40,6 +42,15 @@ onMounted(() => {
     .catch(() => {
       llmReady.value = false
     })
+})
+
+onBeforeUnmount(() => {
+  if (aiTimer) {
+    window.clearInterval(aiTimer)
+    aiTimer = 0
+  }
+  abortCtrl?.abort()
+  abortCtrl = null
 })
 
 watch(
@@ -61,8 +72,16 @@ async function runAiInterpret() {
   aiTimer = window.setInterval(() => {
     aiElapsed.value += 1
   }, 1000)
+  abortCtrl = new AbortController()
   try {
-    const state = await runLlmChatWithPolling(props.prompt, props.context)
+    const state = await runLlmChatWithPolling(
+      props.prompt,
+      props.context,
+      undefined,
+      undefined,
+      undefined,
+      abortCtrl.signal,
+    )
     // TaskState.result 是多任务类型联合，按 LLM 任务结构收窄
     const r = state.result as LlmChatResult | null
     // 后端已保证非空正文（空白正文会以 failed 上浮），前端再拦一道纯空白
@@ -75,9 +94,13 @@ async function runAiInterpret() {
       aiMsg.value = `解读失败：${state.error ?? '未知错误'}（可在「AI 设置」检查配置，或复制 Prompt 手动使用）`
     }
   } catch (e) {
+    // 卸载触发的取消不打扰（组件已不在 DOM）
+    if ((e as Error)?.name === 'AbortError') return
     aiMsg.value = `解读失败：${formatError(e)}（可在「AI 设置」检查配置，或复制 Prompt 手动使用）`
   } finally {
     window.clearInterval(aiTimer)
+    aiTimer = 0
+    abortCtrl = null
     aiRunning.value = false
   }
 }

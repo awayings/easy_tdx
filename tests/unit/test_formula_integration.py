@@ -191,3 +191,13 @@ def test_rest_formula_screen_async_task():
     # symbols 路径需要行情连接——离线环境预期 400/500（无 mock client）
     # 这里只验证请求校验（symbols 非空）不炸
     assert r.status_code in (400, 500, 202)
+
+
+def test_pick_signal_columns_ignores_ratio_value_column():
+    """0~1 值域的比率列归类为数值输出后，不再被自动挑成买卖信号列。"""
+    _, result = attach_formula_columns(
+        _df(60), compile_formula("比率: C / HHV(C, 20);\n强弱: C > MA(C, 5);")
+    )
+    buy, sell = pick_signal_columns(result)
+    assert buy == "强弱"  # 旧码 signals 含「比率」且排在首位，被误选为买入列
+    assert sell is None

@@ -29,9 +29,12 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import os
+import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
@@ -45,6 +48,7 @@ __all__ = [
     "mask_key",
     "resolve_config",
     "save_config",
+    "validate_api_url",
 ]
 
 logger = logging.getLogger(__name__)
@@ -157,29 +161,108 @@ def _read_config_file() -> dict[str, Any]:
 
 
 def load_config() -> LlmConfig:
-    """加载配置：llm.json 显式字段 > 环境变量兜底（未填字段仍为空，调用时再取预设）。"""
+    """加载配置：llm.json 显式字段 > 环境变量兜底（未填字段仍为空，调用时再取预设）。
+
+    字段级防御：llm.json 常被手工编辑，单个字段类型不对（``"temperature":
+    null`` / ``"abc"`` 等）只记 warning 并回退默认值，绝不让 load_config
+    抛异常打挂全部 /llm/* 端点。
+    """
     data = _read_config_file()
     env_url = os.environ.get("LLM_BASE_URL", "")
-    cfg = LlmConfig(
-        provider=str(data.get("provider") or os.environ.get("LLM_PROVIDER", "") or "deepseek"),
-        api_url=str(data.get("api_url") or env_url or ""),
-        api_key=str(data.get("api_key") or os.environ.get("LLM_API_KEY", "") or ""),
-        model=str(data.get("model") or os.environ.get("LLM_MODEL", "") or ""),
-        temperature=float(data.get("temperature", 0.3)),
-        max_tokens=int(data.get("max_tokens", 16000)),
-        timeout=float(data.get("timeout", 180.0)),
-        system_prompt=str(data.get("system_prompt", "") or LlmConfig.system_prompt),
+    return LlmConfig(
+        provider=_clean_str(data.get("provider") or os.environ.get("LLM_PROVIDER", ""), "provider")
+        or "deepseek",
+        api_url=_clean_str(data.get("api_url") or env_url, "api_url"),
+        api_key=_clean_str(data.get("api_key") or os.environ.get("LLM_API_KEY", ""), "api_key"),
+        model=_clean_str(data.get("model") or os.environ.get("LLM_MODEL", ""), "model"),
+        temperature=_clean_float(data.get("temperature"), "temperature", 0.3, minimum=0.0),
+        max_tokens=_clean_int(data.get("max_tokens"), "max_tokens", 16000, minimum=1),
+        timeout=_clean_float(data.get("timeout"), "timeout", 180.0, minimum=0.1),
+        system_prompt=_clean_str(
+            data.get("system_prompt") or LlmConfig.system_prompt, "system_prompt"
+        )
+        or LlmConfig.system_prompt,
     )
-    return cfg
+
+
+def _clean_str(value: Any, field_name: str) -> str:
+    """字符串字段清洗：非 None 的非字符串（数字/列表等）记 warning 后回退空串。"""
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        logger.warning(
+            "LLM 配置字段 %s 应为字符串，收到 %s(%r)，已忽略并回退默认值",
+            field_name,
+            type(value).__name__,
+            value,
+        )
+        return ""
+    return value
+
+
+def _clean_float(
+    value: Any, field_name: str, default: float, *, minimum: float | None = None
+) -> float:
+    """数值字段清洗：非法/非有限/低于下限均 warning 后回退默认。"""
+    if value is None:
+        return default
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        logger.warning(
+            "LLM 配置字段 %s 应为数字，收到 %r，回退默认值 %s", field_name, value, default
+        )
+        return default
+    if not math.isfinite(f) or (minimum is not None and f < minimum):
+        logger.warning(
+            "LLM 配置字段 %s 超出合理范围（%r），回退默认值 %s", field_name, value, default
+        )
+        return default
+    return f
+
+
+def _clean_int(value: Any, field_name: str, default: int, *, minimum: int | None = None) -> int:
+    """整数字段清洗：接受 "8192.9" 这类字符串的宽松矫正（截断到 int）。"""
+    if value is None:
+        return default
+    try:
+        i = int(value)
+    except (TypeError, ValueError):
+        try:
+            i = int(float(value))
+        except (TypeError, ValueError):
+            logger.warning(
+                "LLM 配置字段 %s 应为整数，收到 %r，回退默认值 %s", field_name, value, default
+            )
+            return default
+    if not math.isfinite(i) or (minimum is not None and i < minimum):
+        logger.warning(
+            "LLM 配置字段 %s 超出合理范围（%r），回退默认值 %s", field_name, value, default
+        )
+        return default
+    return i
 
 
 def save_config(cfg: LlmConfig) -> Path:
-    """写入 llm.json（WebUI 保存入口；目录惰性创建）。"""
+    """写入 llm.json（WebUI 保存入口；目录惰性创建；原子写）。
+
+    先写同目录临时文件再 ``os.replace``——写一半崩溃/断电不会留下损坏的
+    llm.json（损坏的后果是下次 load 静默回空配置，用户要重填 key）。
+    """
     p = config_path()
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(
-        json.dumps(cfg.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8", newline="\n"
-    )
+    text = json.dumps(cfg.to_dict(), ensure_ascii=False, indent=2)
+    fd, tmp_name = tempfile.mkstemp(dir=str(p.parent), prefix=".llm-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
+            f.write(text)
+        os.replace(tmp_name, p)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
     return p
 
 
@@ -188,10 +271,12 @@ def resolve_config(cfg: LlmConfig | None = None) -> LlmConfig:
 
     - ``api_url`` 空 → 预设 ``base_url``；
     - ``model`` 空 → 预设 ``default_model``；
-    - provider 无预设（拼错）→ 按 custom 处理，url/model 必须已填。
+    - provider 无预设（拼错）→ 按 custom 处理，url/model 必须已填；
+    - ``api_url`` 强制 http/https 且禁 userinfo（SSRF/本地文件读取防线）。
 
     Raises:
-        ValueError: 补齐后仍缺 api_url 或 model（custom 未填全）。
+        ValueError: 补齐后仍缺 api_url 或 model（custom 未填全），
+            或 api_url 非法（非 http/https、携带 user:pass@）。
     """
     c = replace(cfg or load_config())
     preset = PROVIDER_PRESETS.get(c.provider, PROVIDER_PRESETS["custom"])
@@ -203,6 +288,7 @@ def resolve_config(cfg: LlmConfig | None = None) -> LlmConfig:
         raise ValueError(
             f"LLM 配置不完整：provider={c.provider} 缺少 api_url 或 model，请在 AI 设置中补全"
         )
+    validate_api_url(c.api_url)
     return c
 
 
@@ -226,6 +312,80 @@ class LlmError(RuntimeError):
         self.status = status
 
 
+#: 响应体大小上限：正常 chat 响应远小于此（max_tokens 128k 的纯文本约几百 KB），
+#: 超限说明对端异常（如把 api_url 配成了下载地址），及时中止防内存被撑爆。
+_MAX_RESPONSE_BYTES = 2 * 1024 * 1024
+_READ_CHUNK = 64 * 1024
+
+#: 允许的 URL scheme（SSRF / 本地文件读取防线：file:// 会读本地文件、
+#: ftp:// 与内网 http 可被当跳板——resolve_config 里强制校验）。
+_ALLOWED_URL_SCHEMES = ("http", "https")
+
+
+def validate_api_url(url: str) -> None:
+    """api_url 安全校验：仅 http/https、禁止携带 userinfo（user:pass@）。
+
+    Raises:
+        ValueError: scheme 非法/缺失，或 URL 携带用户凭据（web 层已有
+            ValueError→错误响应通道，CLI 场景同样可直接展示）。
+    """
+    if not url:
+        return
+    parts = urllib.parse.urlsplit(url)
+    scheme = parts.scheme.lower()
+    if scheme not in _ALLOWED_URL_SCHEMES:
+        raise ValueError(
+            f"LLM api_url 非法：仅允许 http/https 地址（收到 scheme={scheme!r}）——"
+            "file/ftp 等协议已禁用；缺前缀时请补 http:// 或 https://"
+        )
+    if parts.username or parts.password:
+        raise ValueError(
+            "LLM api_url 非法：不允许携带用户凭据（user:pass@host 形式）——"
+            "请把鉴权放到 API Key 字段（请求头），而不是 URL 里"
+        )
+
+
+def _read_capped(fp: Any, cap: int = _MAX_RESPONSE_BYTES) -> bytes:
+    """分块读响应体，超过 cap 字节即中止（防异常网关撑爆内存）。"""
+    buf = bytearray()
+    while True:
+        chunk = fp.read(_READ_CHUNK)
+        if not chunk:
+            break
+        buf.extend(chunk)
+        if len(buf) > cap:
+            raise LlmError(
+                f"LLM API 响应超过 {cap // (1024 * 1024)}MB 上限——对端不是正常的 chat 接口"
+                "（请检查 api_url 是否填错），已中止"
+            )
+    return bytes(buf)
+
+
+def _extract_error_message(body: str) -> str | None:
+    """从 provider 错误响应中提取可读 message（不回显原始 body）。
+
+    OpenAI/Anthropic 兼容网关的惯例是 ``{"error": {"message": ...}}``；
+    部分网关 error 直接是字符串，或把 message 放顶层。提取结果截到 300 字符。
+    """
+    try:
+        obj = json.loads(body)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(obj, dict):
+        return None
+    err = obj.get("error")
+    if isinstance(err, dict):
+        msg = err.get("message") or err.get("msg") or err.get("code")
+        if msg:
+            return str(msg)[:300]
+    elif isinstance(err, str) and err:
+        return err[:300]
+    msg = obj.get("message")
+    if msg:
+        return str(msg)[:300]
+    return None
+
+
 def _post_json(
     url: str, headers: dict[str, str], payload: dict[str, Any], timeout: float
 ) -> dict[str, Any]:
@@ -235,6 +395,7 @@ def _post_json(
     超时单独成类报错：非流式 chat 接口要等模型**整段回复生成完**才回包，
     大 Prompt（如整份回测报告解读）生成 1-3 分钟很正常，读超时≠网络故障，
     报错必须把「调大超时」这个动作说清楚（v1.29.1 实测踩坑）。
+    HTTP 错误只回显 provider 的 error.message（≤300 字符），不透传原始 body。
     """
     req = urllib.request.Request(
         url,
@@ -244,11 +405,16 @@ def _post_json(
     )
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            data: dict[str, Any] = json.loads(resp.read().decode("utf-8"))
+            raw = _read_capped(resp)
+            data: dict[str, Any] = json.loads(raw.decode("utf-8", errors="replace"))
             return data
     except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace")[:500]
-        raise LlmError(f"LLM API HTTP {exc.code}: {body}", status=exc.code) from exc
+        try:
+            body = exc.read(_READ_CHUNK).decode("utf-8", errors="replace")
+        except OSError:
+            body = ""
+        detail = _extract_error_message(body) or "接口返回错误响应"
+        raise LlmError(f"LLM API HTTP {exc.code}: {detail}", status=exc.code) from exc
     except urllib.error.URLError as exc:
         if isinstance(exc.reason, TimeoutError):
             raise LlmError(_timeout_message(timeout)) from exc
@@ -256,7 +422,9 @@ def _post_json(
     except TimeoutError as exc:
         raise LlmError(_timeout_message(timeout)) from exc
     except json.JSONDecodeError as exc:
-        raise LlmError(f"LLM API 响应不是合法 JSON: {exc}") from exc
+        raise LlmError(
+            "LLM API 响应不是合法 JSON——api_url 可能不是 chat 接口端点，请检查 AI 设置"
+        ) from exc
 
 
 def _timeout_message(timeout: float) -> str:
@@ -325,8 +493,14 @@ class LlmClient:
         except LlmError:
             raise
         except (KeyError, IndexError, TypeError) as exc:
-            raw = json.dumps(data, ensure_ascii=False)[:300]
-            raise LlmError(f"LLM 响应格式异常: {raw}") from exc
+            # 不回显原始响应体：内容可能包含网关内部信息，且 historical 上
+            # 曾被当作任意 URL 响应的回读通道。只描述缺什么 + 顶层键名。
+            hint = sorted(data.keys()) if isinstance(data, dict) else type(data).__name__
+            raise LlmError(
+                "LLM 响应格式异常：未找到 choices[0].message 字段"
+                f"（响应顶层字段: {hint}）——请检查 api_url 是否为正确的"
+                " chat/completions 端点、模型名是否正确"
+            ) from exc
 
     def _extract_reply_openai(self, message: dict[str, Any], finish: str) -> str:
         """从 OpenAI 兼容响应的 message 里提取正文，处理思考型模型的空白正文。
@@ -352,8 +526,11 @@ class LlmClient:
             raise LlmError(
                 "模型输出被 max_tokens 截断且无正文，请在「AI 设置」调大 Max Tokens 后重试"
             )
-        raw = json.dumps(message, ensure_ascii=False)[:300]
-        raise LlmError(f"LLM 响应 message.content 为空: {raw}")
+        keys = sorted(message.keys()) if isinstance(message, dict) else type(message).__name__
+        raise LlmError(
+            f"LLM 响应 message.content 为空（message 字段: {keys}，"
+            f"finish_reason={finish or 'unknown'}）——请检查模型名与 api_url 是否匹配"
+        )
 
     def _chat_anthropic(self, prompt: str, system: str) -> str:
         cfg = self._cfg
@@ -371,11 +548,64 @@ class LlmClient:
         url = f"{cfg.api_url.rstrip('/')}/messages"
         data = _post_json(url, headers, payload, cfg.timeout)
         try:
-            blocks = data["content"]
-            return "".join(str(b.get("text", "")) for b in blocks if b.get("type") == "text")
-        except (KeyError, TypeError) as exc:
-            raw = json.dumps(data, ensure_ascii=False)[:300]
-            raise LlmError(f"LLM 响应格式异常: {raw}") from exc
+            return self._extract_reply_anthropic(data)
+        except LlmError:
+            raise
+        except (KeyError, TypeError, AttributeError) as exc:
+            # 与 openai 路径同口径：不回显原始响应体，只描述问题
+            hint = sorted(data.keys()) if isinstance(data, dict) else type(data).__name__
+            raise LlmError(
+                f"LLM 响应格式异常：content 字段不可解析（响应顶层字段: {hint}）——"
+                "请确认 api_url 指向 Anthropic /messages 端点、模型名正确"
+            ) from exc
+
+    def _extract_reply_anthropic(self, data: dict[str, Any]) -> str:
+        """从 Anthropic 响应提取正文，与 openai 路径同口径：绝不返回空串。
+
+        - content 是块列表：拼接 text 块，统计 thinking 块字数（思考耗尽
+          max_tokens 时报可操作错误，而非静默成功空串）；
+        - content 是字符串（部分网关）：直接作为正文；
+        - 空白正文：按 stop_reason 给「调大 Max Tokens」指引。
+        """
+        content = data["content"]
+        if isinstance(content, str):
+            text = content
+            thinking_len = 0
+            block_types: list[str] = []
+        elif isinstance(content, list):
+            parts: list[str] = []
+            thinking_len = 0
+            block_types = []
+            for b in content:
+                if not isinstance(b, dict):
+                    continue
+                b_type = str(b.get("type") or "")
+                block_types.append(b_type)
+                if b_type == "text":
+                    parts.append(str(b.get("text") or ""))
+                elif b_type in ("thinking", "redacted_thinking"):
+                    thinking_len += len(str(b.get("thinking") or b.get("data") or ""))
+            text = "".join(parts)
+        else:
+            raise TypeError(f"content 应为块列表或字符串，收到 {type(content).__name__}")
+        if text.strip():
+            return text
+        finish = str(data.get("stop_reason") or "")
+        if thinking_len:
+            raise LlmError(
+                f"模型只返回了思考链（thinking {thinking_len} 字），未生成正文——"
+                f"max_tokens={self._cfg.max_tokens} 大概率被思考耗尽"
+                f"（stop_reason={finish or 'unknown'}）。"
+                "请在「AI 设置」把 Max Tokens 调大（思考型模型建议 ≥16000）后重试"
+            )
+        if finish == "max_tokens":
+            raise LlmError(
+                "模型输出被 max_tokens 截断且无正文，请在「AI 设置」调大 Max Tokens 后重试"
+            )
+        raise LlmError(
+            f"LLM 响应 content 为空（block 类型: {block_types or '无'}，"
+            f"stop_reason={finish or 'unknown'}）——请检查模型名与 api_url 是否匹配"
+        )
 
     async def test(self) -> dict[str, Any]:
         """连通性测试：发一句极短 ping，返回 ok/延迟/样例回复。"""

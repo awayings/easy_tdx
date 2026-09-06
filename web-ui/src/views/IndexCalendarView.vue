@@ -24,8 +24,11 @@ const bars = ref<Bar[]>([])
 const lastUpdate = ref('')
 
 async function loadIndex(idx: number) {
-  if (barsByIndex.has(idx)) {
-    bars.value = barsByIndex.get(idx)!
+  const cached = barsByIndex.get(idx)
+  if (cached) {
+    bars.value = cached
+    error.value = '' // 其他指数的失败/空数据提示不带到已缓存的指数上
+    loading.value = false
     return
   }
   loading.value = true
@@ -33,9 +36,13 @@ async function loadIndex(idx: number) {
   try {
     const meta = INDICES[idx]
     const data = await fetchIndexBars(meta.market, meta.code, 550) // ≈2.2 年
+    if (data.length === 0) {
+      // 空数据不入缓存：否则"重试"命中缓存直接 return，永远无法重新请求
+      error.value = `${meta.name} 日K返回空`
+      return
+    }
     barsByIndex.set(idx, data)
     bars.value = data
-    if (data.length === 0) error.value = `${meta.name} 日K返回空`
     lastUpdate.value = new Date().toLocaleTimeString('zh-CN', { hour12: false })
   } catch (e) {
     error.value = formatError(e)

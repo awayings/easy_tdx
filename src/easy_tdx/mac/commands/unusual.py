@@ -34,8 +34,12 @@ UNUSUAL_TYPE_NAMES: dict[int, str] = {
 }
 
 
-def _describe_unusual(unusual_type: int, data: bytes, hour: int = 9) -> tuple[str, str]:
-    """根据异动类型解析描述和数值。hour 用于区分竞价/尾盘双时刻信号（0x15）。"""
+def _describe_unusual(unusual_type: int, data: bytes, hour: int) -> tuple[str, str]:
+    """根据异动类型解析描述和数值。
+
+    hour 必传：来自报文时间槽（offset 29），用于区分竞价/尾盘双时刻信号
+    （0x15）——缺省会按 9 点把 15:00 的收盘信号误标成「竞价」。
+    """
     if len(data) < 13:
         return "", ""
     v1, v2, v3, v4 = struct.unpack_from("<B2fI", data)

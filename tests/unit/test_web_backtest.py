@@ -349,37 +349,31 @@ def test_task_runner_captures_failure():
 
 
 def test_task_runner_lru_eviction():
-    """超过上限应丢弃最旧的非 running 任务。
+    """超限淘汰只移终态任务（v1.32.6：pending/running 不淘汰，防幽灵任务）。
 
-    注意：淘汰发生在 submit 时，淘汰对象是「当时最旧的非 running 任务」。
-    用 max_workers=1 串行执行时，哪个任务被淘汰取决于提交速度 vs 执行速度
-    的竞态（快机器上 t0 还在 running 会被跳过，慢机器上 t0 已完成会被淘汰）。
-    所以本测试不断言「特定 task_id 被淘汰」，而是验证：
-    (1) 存活的 non-running 任务数 ≤ max_results
-    (2) 最后提交的任务一定存活（它是最近的，不可能被 LRU 淘汰）
-    (3) 至少有 2 个任务被淘汰（5 提交 - 3 上限 = 2）
+    确定性设计：max_workers=1 串行。先提交 5 个并等全部 done（提交瞬间的
+    淘汰因全是 pending 而跳过——这正是新语义），随后提交第 6 个触发淘汰：
+    此时 5 个全是终态，按 LRU 淘到只剩 max_results=3（t3/t4/t5）。
     """
     from easy_tdx.web.task_runner import BacktestTaskRunner
 
     runner = BacktestTaskRunner(max_workers=1, max_results=3)
     ids = [runner.submit(lambda: {"i": i}, description=f"t{i}") for i in range(5)]
-    # 等待存活的任务全部完成（被淘汰的 peek 返回 None，跳过）
+    # 等 5 个任务全部完成
     for _ in range(200):
-        alive = [tid for tid in ids if runner.peek(tid) is not None]
-        if all(runner.peek(tid).status in ("done", "failed") for tid in alive):
+        states = [runner.peek(tid) for tid in ids]
+        if all(s is not None and s.status in ("done", "failed") for s in states):
             break
         time.sleep(0.02)
 
-    # 最后提交的任务一定存活（LRU 最近，不可能被淘汰）
-    assert runner.peek(ids[4]) is not None, "最后提交的任务不应被淘汰"
-
-    # 至少淘汰 2 个（5 提交 - max_results 3 = 2）
-    surviving = [tid for tid in ids if runner.peek(tid) is not None]
-    evicted = [tid for tid in ids if runner.peek(tid) is None]
-    assert len(evicted) >= 2, f"应至少淘汰 2 个任务，实际淘汰 {len(evicted)} 个"
-
-    # 存活任务数不超过 max_results（running 完成后）
-    assert len(surviving) <= 3, f"存活任务 {len(surviving)} 超过上限 3"
+    # 全部完成后提交第 6 个 → 淘汰最旧的 3 个 done（t0/t1/t2）
+    ids.append(runner.submit(lambda: {"i": 5}, description="t5"))
+    assert runner.peek(ids[5]) is not None
+    assert runner.peek(ids[0]) is None, "最旧的 done 应被淘汰"
+    assert runner.peek(ids[1]) is None
+    assert runner.peek(ids[2]) is None
+    for tid in ids[3:]:
+        assert runner.peek(tid) is not None, "最近的任务不应被淘汰"
 
     runner.shutdown()
 
@@ -1365,3 +1359,284 @@ def test_multi_strategy_evaluate_endpoint(client, monkeypatch):
     assert report["grade"]["scenario"] == "portfolio"
     assert report["fitness"]["total_checks"] == 8
     assert report["config"]["slots"] == ["双均线交叉@SH:601088", "MACD 金叉@SZ:000001"]
+
+
+# ── submit 响应真实状态（v1.32.6 修复：不再把 done/failed 谎报为 running）──────
+
+
+class _InstantDoneRunner:
+    """submit 即同步跑完的假 runner（模拟"拿到 future 前任务已完成"）。"""
+
+    def __init__(self, status: str = "done"):
+        self.status = status
+
+    def submit(self, func, *, description=""):
+        func()  # 同步执行完毕
+        return "tid-done"
+
+    def get(self, task_id):
+        from easy_tdx.web.task_runner import TaskState
+
+        return TaskState(
+            task_id=task_id,
+            status=self.status,  # type: ignore[arg-type]
+            result={
+                "performance": {},
+                "equity_curve": [],
+                "trades": [],
+                "positions": [],
+                "config": {},
+            },
+            finished_at=1.0,
+            started_at=0.0,
+            created_at=0.0,
+        )
+
+
+def test_task_submit_response_accepts_terminal_status():
+    """TaskSubmitResponse.status 应接受 done/failed（旧 Literal 只许 pending/running）。"""
+    from easy_tdx.web.backtest_schemas import TaskSubmitResponse
+
+    assert TaskSubmitResponse(task_id="x", status="done").status == "done"
+    assert TaskSubmitResponse(task_id="x", status="failed").status == "failed"
+    assert TaskSubmitResponse(task_id="x", status="pending").status == "pending"
+
+
+def test_async_submit_reports_real_done_status(monkeypatch):
+    """极快任务已 done 时，202 响应应透传真实状态 "done"（旧码谎报 "running"）。"""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from easy_tdx.web.errors import register_exception_handlers
+    from easy_tdx.web.routers import backtest as backtest_mod
+
+    monkeypatch.setattr(backtest_mod, "get_runner", lambda: _InstantDoneRunner("done"))
+
+    app = FastAPI()
+    register_exception_handlers(app)
+    app.include_router(backtest_mod.router, prefix="/api/v1")
+    app.state.tdx_client = object()
+
+    with TestClient(app) as tc:
+        resp = tc.post(
+            "/api/v1/backtest/run/async",
+            json={
+                "strategy": "ma_cross",
+                "params": {"fast": 3, "slow": 6},
+                "ohlcv": [
+                    {
+                        "datetime": f"2024-01-{d:02d}",
+                        "open": 10.0,
+                        "high": 10.5,
+                        "low": 9.5,
+                        "close": 10.0,
+                        "vol": 1000.0,
+                        "amount": 10000.0,
+                    }
+                    for d in range(1, 6)
+                ],
+            },
+        )
+    assert resp.status_code == 202, resp.text
+    assert resp.json()["status"] == "done"
+
+
+def test_async_submit_reports_failed_status(monkeypatch):
+    """任务同步失败时响应应报 "failed" 而非 "running"。"""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from easy_tdx.web.errors import register_exception_handlers
+    from easy_tdx.web.routers import backtest as backtest_mod
+
+    class _FailingRunner(_InstantDoneRunner):
+        def submit(self, func, *, description=""):
+            try:
+                func()
+            except Exception:
+                pass
+            return "tid-fail"
+
+    monkeypatch.setattr(backtest_mod, "get_runner", lambda: _FailingRunner("failed"))
+    app = FastAPI()
+    register_exception_handlers(app)
+    app.include_router(backtest_mod.router, prefix="/api/v1")
+    app.state.tdx_client = object()
+
+    with TestClient(app) as tc:
+        resp = tc.post(
+            "/api/v1/backtest/run/async",
+            json={
+                "strategy": "no_such_strategy",
+                "ohlcv": [
+                    {
+                        "datetime": "2024-01-01",
+                        "open": 10.0,
+                        "high": 10.5,
+                        "low": 9.5,
+                        "close": 10.0,
+                        "vol": 1000.0,
+                        "amount": 10000.0,
+                    },
+                    {
+                        "datetime": "2024-01-02",
+                        "open": 10.0,
+                        "high": 10.5,
+                        "low": 9.5,
+                        "close": 10.0,
+                        "vol": 1000.0,
+                        "amount": 10000.0,
+                    },
+                ],
+            },
+        )
+    assert resp.status_code == 202, resp.text
+    assert resp.json()["status"] == "failed"
+
+
+def test_formula_submit_reports_real_status(monkeypatch):
+    """formula 回测提交响应透传真实状态（旧码硬编码 "running"）。"""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from easy_tdx.web.errors import register_exception_handlers
+    from easy_tdx.web.routers import formula as formula_mod
+
+    monkeypatch.setattr(formula_mod, "get_runner", lambda: _InstantDoneRunner("done"))
+    app = FastAPI()
+    register_exception_handlers(app)
+    app.include_router(formula_mod.router, prefix="/api/v1")
+    app.state.tdx_client = object()
+
+    ohlcv = [
+        {
+            "datetime": f"2024-01-{d:02d}",
+            "open": 10.0,
+            "high": 10.5,
+            "low": 9.5,
+            "close": 10.0,
+            "vol": 1000.0,
+        }
+        for d in range(1, 6)
+    ]
+    with TestClient(app) as tc:
+        resp = tc.post(
+            "/api/v1/formula/backtest/run/async",
+            json={"text": "CROSS(C, MA(C, 3));", "ohlcv": ohlcv},
+        )
+    assert resp.status_code == 202, resp.text
+    assert resp.json()["status"] == "done"
+
+
+# ── optimize 费率口径（stamp_tax / min_commission / auto_fees 透传）───────────
+
+
+def test_optimize_request_accepts_fee_fields():
+    """OptimizeBacktestRequest 应支持 stamp_tax/min_commission/auto_fees（镜像单标的）。"""
+    from easy_tdx.web.backtest_schemas import OptimizeBacktestRequest
+
+    req = OptimizeBacktestRequest(
+        strategy="ma_cross",
+        param_grid={"fast": [3]},
+        symbol="SZ:000001",
+        stamp_tax=0.0,
+        min_commission=1.0,
+        auto_fees=True,
+    )
+    assert req.stamp_tax == 0.0
+    assert req.min_commission == 1.0
+    assert req.auto_fees is True
+    with pytest.raises(ValueError):
+        OptimizeBacktestRequest(
+            strategy="ma_cross",
+            param_grid={"fast": [3]},
+            symbol="SZ:000001",
+            stamp_tax=0.5,  # > le=0.01
+        )
+
+
+def test_optimize_auto_fees_etf_matches_explicit_fee_backtest(sample_ohlcv):
+    """ETF + auto_fees：寻优结果的买入持有基准与"显式 ETF 费率"口径一致。
+
+    旧实现不透传 stamp_tax/min_commission（恒按股票默认 0.001/5.0），品种
+    口径无法生效。用可转债（佣金 0.0002 / 最低佣金 1.0 / 免印花税）验证：
+    寻优结果的买入持有基准与"显式可转债费率"同口径，且与旧股票默认口径
+    不同（_BuyAndHold 不卖出，印花税不进收益，差异来自佣金/最低佣金）。
+    """
+    from easy_tdx.backtest.benchmark import run_buy_hold_benchmark
+    from easy_tdx.web.backtest_schemas import OptimizeBacktestRequest
+    from easy_tdx.web.routers.backtest import _run_optimize
+
+    df = pd.DataFrame(sample_ohlcv)
+    df["datetime"] = pd.to_datetime(df["datetime"])
+    req = OptimizeBacktestRequest(
+        strategy="ma_cross",
+        param_grid={"fast": [3], "slow": [10]},
+        cash=1_000_000.0,
+        symbol="SH:110059",  # 可转债：佣金 0.0002 / 最低佣金 1.0 / 免印花税
+        auto_fees=True,
+    )
+    out = _run_optimize(df, req)
+
+    # 期望口径：可转债费率
+    expected = run_buy_hold_benchmark(
+        df,
+        cash=req.cash,
+        commission=0.0002,
+        min_commission=1.0,
+        slippage=req.slippage,
+        execution=req.execution,
+    )
+    legacy = run_buy_hold_benchmark(
+        df,
+        cash=req.cash,
+        commission=req.commission,  # 0.0003（股票默认）
+        min_commission=5.0,
+        slippage=req.slippage,
+        execution=req.execution,
+    )
+    assert out["buy_hold"] is not None
+    assert out["buy_hold"]["total_return"] == pytest.approx(expected["total_return"])
+    # 若与旧股票默认口径相同则说明 auto_fees 没生效
+    assert out["buy_hold"]["total_return"] != pytest.approx(legacy["total_return"])
+
+
+def test_optimize_passes_resolved_fees_to_optimizer(sample_ohlcv, monkeypatch):
+    """auto_fees 解析出的费率应透传给 ParamGridOptimizer（显式值优先）。"""
+    import easy_tdx.backtest.optimizer as opt_mod
+    from easy_tdx.web.backtest_schemas import OptimizeBacktestRequest
+    from easy_tdx.web.routers.backtest import _run_optimize
+
+    captured: dict = {}
+
+    class SpyOptimizer(opt_mod.ParamGridOptimizer):
+        def __init__(self, *args, **kwargs):
+            captured.update(kwargs)
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(opt_mod, "ParamGridOptimizer", SpyOptimizer)
+
+    df = pd.DataFrame(sample_ohlcv)
+    df["datetime"] = pd.to_datetime(df["datetime"])
+    req = OptimizeBacktestRequest(
+        strategy="ma_cross",
+        param_grid={"fast": [3], "slow": [10]},
+        symbol="SH:510300",
+        auto_fees=True,
+    )
+    _run_optimize(df, req)
+    # ETF 口径：印花税解析为 0
+    assert captured.get("stamp_tax") == 0.0
+    assert captured.get("min_commission") == 5.0
+
+    # 显式非默认 stamp_tax 优先于品种默认
+    captured.clear()
+    req2 = OptimizeBacktestRequest(
+        strategy="ma_cross",
+        param_grid={"fast": [3], "slow": [10]},
+        symbol="SH:510300",
+        auto_fees=True,
+        stamp_tax=0.005,
+    )
+    _run_optimize(df, req2)
+    assert captured.get("stamp_tax") == 0.005

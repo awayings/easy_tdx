@@ -17,12 +17,22 @@
 
 from __future__ import annotations
 
-from datetime import datetime, time, tzinfo
+from datetime import datetime, time, timedelta, timezone, tzinfo
 from typing import Any
 
-__all__ = ["SESSION_WINDOWS", "SESSION_DESC", "is_trading_time", "session_info"]
+__all__ = [
+    "SHANGHAI_TZ",
+    "SESSION_WINDOWS",
+    "SESSION_DESC",
+    "is_trading_time",
+    "session_info",
+]
 
-#: 有效行情时段（本地时间）。窗口 = (start, end)，含两端。
+#: A 股行情统一按沪市时区判断。中国无夏令时，固定 UTC+8 即可精确表达，
+#: 不依赖系统时区/zoneinfo 数据库（Windows 无 IANA tzdata）。
+SHANGHAI_TZ = timezone(timedelta(hours=8), "Asia/Shanghai")
+
+#: 有效行情时段（沪市时间）。窗口 = (start, end)，含两端。
 #: - 早盘 09:15:00-11:30:30：09:15 起集合竞价可看，11:30:30 容纳尾单撮合散点；
 #: - 午盘 13:00:00-15:05:00：15:00-15:03 为收盘集合竞价，留 2 分钟余量。
 SESSION_WINDOWS: tuple[tuple[time, time], ...] = (
@@ -42,13 +52,14 @@ def is_trading_time(now: datetime | None = None, *, tz: tzinfo | None = None) ->
     而节假日行情本就不动，手动刷新始终可用）。
 
     Args:
-        now: 待判断时间，None = 取本地当前时间。
-        tz: 未传 ``now`` 时使用的时区，None = 系统本地时区。
+        now: 待判断时间，None = 取当前时间。
+        tz: 未传 ``now`` 时使用的时区，None = :data:`SHANGHAI_TZ`（与主机
+            时区无关；非中国时区的服务器/海外机器不会错位）。
 
     Returns:
         True = 盘中（含集合竞价缓冲窗）。
     """
-    t = now or datetime.now(tz=tz)
+    t = now or datetime.now(tz=tz or SHANGHAI_TZ)
     if t.weekday() >= 5:  # 周六/周日
         return False
     for start, end in SESSION_WINDOWS:
@@ -62,7 +73,7 @@ def session_info(now: datetime | None = None, *, tz: tzinfo | None = None) -> di
 
     前端以本地判断为主（每 15s 重估），本接口用于校准服务器侧视角。
     """
-    t = now or datetime.now(tz=tz)
+    t = now or datetime.now(tz=tz or SHANGHAI_TZ)
     return {
         "is_trading_time": is_trading_time(t),
         "sessions": [

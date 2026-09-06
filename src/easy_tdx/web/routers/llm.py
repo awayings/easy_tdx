@@ -226,8 +226,10 @@ async def llm_chat_async(req: LlmChatRequest) -> TaskSubmitResponse:
 
     runner = get_runner()
     task_id = runner.submit(_run, description=desc)
-    state = runner.get(task_id)
-    status: Any = state.status if state.status in ("pending", "running") else "running"
+    try:
+        status = runner.get(task_id).status
+    except KeyError:  # 极端：状态尚未可查时按提交默认态上报
+        status = "running"
     return TaskSubmitResponse(task_id=task_id, status=status)
 
 

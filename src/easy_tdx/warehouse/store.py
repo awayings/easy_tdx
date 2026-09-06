@@ -29,12 +29,25 @@ from typing import Any
 
 import pandas as pd
 
+from easy_tdx.realtime.session import SHANGHAI_TZ
+
 logger = logging.getLogger(__name__)
 
 __all__ = ["KlineWarehouse", "default_warehouse_path", "MARKET_TO_TDX"]
 
 # 未收盘 cutoff：15:05（A股 15:00 收盘 + 5 分钟数据落定余量）
 _MARKET_CLOSE_CUTOFF = dt_time(15, 5)
+
+
+def _shanghai_now() -> datetime:
+    """沪市墙钟（naive）：provisional 判定与主机时区无关。
+
+    非 UTC+8 主机（海外服务器）的系统本地时间会把「当日 / 15:05 前」判错
+    （UTC 主机上沪市 18:00 收盘后本地才 10:00，当日 bar 被误标 provisional
+    而被默认查询隐藏），故统一按 A 股时区取墙钟。中国无夏令时，固定 UTC+8。
+    """
+    return datetime.now(SHANGHAI_TZ).replace(tzinfo=None)
+
 
 MARKET_TO_TDX: dict[str, int] = {"SZ": 0, "SH": 1, "BJ": 2}
 _TDX_TO_MARKET: dict[int, str] = {v: k for k, v in MARKET_TO_TDX.items()}
@@ -90,7 +103,13 @@ class KlineWarehouse:
         self._duckdb = _require_duckdb()
         self._path = Path(db_path) if db_path is not None else default_warehouse_path()
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = self._duckdb.connect(str(self._path))
+        try:
+            self._conn = self._duckdb.connect(str(self._path))
+        except Exception as exc:
+            raise RuntimeError(
+                f"无法打开 K 线仓库 {self._path}：{exc}"
+                "（DuckDB 为单写者——请检查是否另有 easy-tdx 进程/CLI 正占用该文件）"
+            ) from exc
         self._conn.execute(_SCHEMA)
 
     # ── 基本属性 ─────────────────────────────────────────────────────────────
@@ -143,7 +162,7 @@ class KlineWarehouse:
             if c not in src.columns:
                 src[c] = float("nan")
 
-        now = datetime.now()
+        now = _shanghai_now()
         today = now.date()
         before_close = now.time() < _MARKET_CLOSE_CUTOFF
 
@@ -201,15 +220,44 @@ class KlineWarehouse:
         updated = len(rows) - inserted
         return (inserted, updated)
 
-    def promote_provisional(self) -> int:
-        """把「日期已过」的 provisional 行转正（收盘后的临时值已被次日增量覆盖）。"""
-        today = datetime.now().date()
+    def promote_provisional(
+        self,
+        market: str | None = None,
+        code: str | None = None,
+        before: datetime | pd.Timestamp | None = None,
+    ) -> int:
+        """把 provisional 行转正为 completed，返回转正行数。
+
+        两种用法：
+
+        - **同步流程（推荐）**：``promote_provisional(market, code,
+          before=max_dt)``——在拉取成功并 upsert 之后调用，只转正「本次成功
+          拉到的数据已覆盖」（datetime <= before）的行；拉取失败/为空时不
+          调用，盘中临时值不会被洗成 completed。
+        - **无参维护**：仅转正日期早于沪市今日的行（历史遗留清理）。
+
+        Args:
+            market: 限定市场（None = 全仓库）。
+            code: 限定标的（None = 全市场）。
+            before: 只转正 datetime <= 该时刻的行；None = 日期早于沪市今日。
+        """
+        conds = ["status = 'provisional'"]
+        params: list[Any] = []
+        if before is not None:
+            conds.append("datetime <= ?")
+            params.append(pd.Timestamp(before).to_pydatetime())
+        else:
+            conds.append("CAST(datetime AS DATE) < ?")
+            params.append(_shanghai_now().date())
+        if market is not None:
+            conds.append("market = ?")
+            params.append(market.upper())
+        if code is not None:
+            conds.append("code = ?")
+            params.append(code)
         cur = self._conn.execute(
-            """
-            UPDATE klines SET status = 'completed'
-            WHERE status = 'provisional' AND CAST(datetime AS DATE) < ?
-            """,
-            [today],
+            f"UPDATE klines SET status = 'completed' WHERE {' AND '.join(conds)}",
+            params,
         )
         return int(cur.fetchone()[0]) if cur.description else 0
 
@@ -347,7 +395,7 @@ class KlineWarehouse:
         ).df()
 
         issues: list[dict[str, Any]] = []
-        today = date.today()
+        today = _shanghai_now().date()
         stale: list[dict[str, Any]] = []
         total_provisional = 0
 
@@ -409,7 +457,7 @@ class KlineWarehouse:
                 "symbols_with_issues": len({i["symbol"] for i in issues}),
                 "stale_symbols": stale[:20],
                 "provisional_rows": total_provisional,
-                "checked_at": datetime.now().isoformat(timespec="seconds"),
+                "checked_at": _shanghai_now().isoformat(timespec="seconds"),
             },
         }
 

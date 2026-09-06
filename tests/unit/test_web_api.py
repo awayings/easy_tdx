@@ -599,3 +599,33 @@ def test_create_app_no_ui_mode():
     app_ui = create_app()
     mounts_ui = [r for r in app_ui.routes if type(r).__name__ == "Mount"]
     assert any(getattr(m, "name", "") == "web-ui" for m in mounts_ui)
+
+
+# ── /server/test 输入约束（v1.32.6：timeout 上界 + hosts 限长）───────────────
+
+
+def test_server_test_request_constraints():
+    """timeout 限 0.5~30s；hosts ≤50 项且单项 ≤253 字符。
+
+    旧实现 timeout 无上界（1e9 会把 to_thread 线程挂死）、hosts 不限长
+    （可当内网扫描跳板）。
+    """
+    pytest.importorskip("fastapi")
+    from pydantic import ValidationError
+
+    from easy_tdx.web.routers.server import ServerTestRequest
+
+    assert ServerTestRequest(hosts=None, timeout=5.0).timeout == 5.0
+    assert ServerTestRequest(hosts=["127.0.0.1"], timeout=0.5).timeout == 0.5
+
+    with pytest.raises(ValidationError):
+        ServerTestRequest(timeout=31.0)  # 超上界
+    with pytest.raises(ValidationError):
+        ServerTestRequest(timeout=0.1)  # 低于下界
+    with pytest.raises(ValidationError):
+        ServerTestRequest(hosts=[f"h{i}" for i in range(51)])  # 超 50 项
+    with pytest.raises(ValidationError):
+        ServerTestRequest(hosts=["x" * 254])  # 单项超 253 字符
+    # 边界可用
+    ok = ServerTestRequest(hosts=["h" * 253] * 50, timeout=30.0)
+    assert len(ok.hosts) == 50

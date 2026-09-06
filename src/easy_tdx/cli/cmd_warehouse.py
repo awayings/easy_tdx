@@ -20,6 +20,32 @@ from typing import Any
 
 import click
 
+#: sync 支持的周期（与 Period 枚举名对齐，仓库按同名键存储）。
+_PERIOD_CHOICES = ["DAILY", "WEEKLY", "MONTHLY", "MIN_1", "MIN_5", "MIN_15", "MIN_30", "MIN_60"]
+#: baostock 是 EOD 源，只覆盖日线及以上（与 sources/baostock.py 的能力边界一致）。
+_BAOSTOCK_PERIODS = ("DAILY", "WEEKLY", "MONTHLY")
+
+
+def _parse_symbol(sym: str) -> tuple[str, str]:
+    """解析 ``市场:代码``；格式不对抛 click.BadParameter（而非裸 ValueError）。"""
+    market, sep, code = sym.strip().partition(":")
+    if not sep or not market.strip() or not code.strip() or ":" in code:
+        raise click.BadParameter(
+            f"标的格式应为 市场:代码（如 SH:600519），收到: {sym!r}",
+            param_hint="--symbols",
+        )
+    return market.strip().upper(), code.strip()
+
+
+def _validate_source_period(source: str, period: str) -> None:
+    """--source baostock 不支持的周期在参数层直接报错（而非静默空转 exit 0）。"""
+    if source == "baostock" and period.upper() not in _BAOSTOCK_PERIODS:
+        raise click.BadParameter(
+            f"--source baostock 仅支持日线及以上周期 {'/'.join(_BAOSTOCK_PERIODS)}，"
+            f"收到: {period}（baostock 为 EOD 源，无分钟线）",
+            param_hint="--period",
+        )
+
 
 def _require_warehouse(db_path: str | None) -> Any:
     """惰性导入 warehouse（duckdb 可选依赖），失败给友好错误。"""
@@ -40,7 +66,13 @@ def warehouse() -> None:
 @click.option(
     "--symbols", required=True, help="标的列表：逗号分隔（SH:600519,SZ:000001）或 @文件（每行一个）"
 )
-@click.option("--period", default="DAILY", help="K 线周期（默认 DAILY）")
+@click.option(
+    "--period",
+    "period",
+    default="DAILY",
+    type=click.Choice(_PERIOD_CHOICES, case_sensitive=False),
+    help="K 线周期（默认 DAILY；baostock 源仅支持日线及以上）",
+)
 @click.option("--max-bars", default=8000, type=int, help="首同步最大拉取根数（默认 8000）")
 @click.option("--tail-bars", default=15, type=int, help="增量同步尾部根数（默认 15）")
 @click.option(
@@ -72,6 +104,7 @@ def warehouse_sync(
     db_path: str | None,
 ) -> None:
     """增量同步行情进仓库（首同步全量、此后只补尾部）。"""
+    _validate_source_period(source, period)
     if symbols.startswith("@"):
         from pathlib import Path
 
@@ -86,6 +119,9 @@ def warehouse_sync(
         ]
     else:
         symbol_list = [s.strip() for s in symbols.split(",") if s.strip()]
+    # 前置校验全部标的格式（缺冒号等在发请求前就报错，而非循环中途裸崩）
+    for sym in symbol_list:
+        _parse_symbol(sym)
 
     with _require_warehouse(db_path) as wh:
         from easy_tdx.warehouse import WarehouseSyncer
@@ -100,7 +136,7 @@ def warehouse_sync(
             syncer = WarehouseSyncer(
                 kline_client, wh, max_bars=max_bars, tail_bars=tail_bars, adjust=adjust
             )
-            summary = syncer.sync(symbol_list, period=period, progress=_progress)
+            summary = syncer.sync(symbol_list, period=period.upper(), progress=_progress)
         else:
             from ..cli.conn import get_mac_client
 
@@ -115,13 +151,18 @@ def warehouse_sync(
                 syncer = WarehouseSyncer(
                     kline_client, wh, max_bars=max_bars, tail_bars=tail_bars, adjust=adjust
                 )
-                summary = syncer.sync(symbol_list, period=period, progress=_progress)
-        click.echo(
-            json.dumps(
-                {k: v for k, v in summary.items() if k != "details"},
-                ensure_ascii=False,
-            )
-        )
+                summary = syncer.sync(symbol_list, period=period.upper(), progress=_progress)
+        # source 口径标注进 summary（与 /bars 响应的 source 字段呼应）
+        payload = {k: v for k, v in summary.items() if k != "details"}
+        payload["source"] = source
+        # 失败明细打到 stderr（JSON 主体保持机器可读）
+        for d in summary.get("details", []):
+            if isinstance(d, dict) and d.get("error"):
+                click.echo(f"  {d['symbol']}: {d['error']}", err=True)
+        click.echo(json.dumps(payload, ensure_ascii=False))
+        if summary.get("failed"):
+            click.echo(f"错误: {summary['failed']}/{summary['total']} 个标的同步失败", err=True)
+            raise SystemExit(1)
 
 
 @warehouse.command("query")
@@ -189,11 +230,13 @@ def warehouse_check(symbols: str | None, db_path: str | None) -> None:
     with _require_warehouse(db_path) as wh:
         market = code = None
         if symbols:
-            first = [s.strip() for s in symbols.split(",") if s.strip()][0]
-            market, code = first.split(":", 1)
-            if ":" not in symbols and len(symbols.split(",")) > 1:
+            # 先校验「只支持一个标的」，再解析（旧码顺序颠倒：含冒号的多标的
+            # 绕过校验后在 split 处裸崩；无冒号单标的直接 ValueError）
+            sym_list = [s.strip() for s in symbols.split(",") if s.strip()]
+            if len(sym_list) > 1:
                 click.echo("错误: --symbols 自检模式一次只支持一个标的", err=True)
                 raise SystemExit(1)
+            market, code = _parse_symbol(sym_list[0])
         report = wh.health_check(market=market, code=code)
     click.echo(json.dumps(report, ensure_ascii=False, default=str))
     if report["issues"]:

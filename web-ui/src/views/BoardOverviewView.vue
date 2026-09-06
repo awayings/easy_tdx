@@ -37,18 +37,26 @@ const error = ref('')
 const lastRefresh = ref('')
 const stat = ref<MarketStat | null>(null)
 
+/** 请求序号守卫：await 后比对，过期响应直接丢弃。 */
+let overviewSeq = 0
+
 async function loadOverview() {
+  const my = ++overviewSeq
   loading.value = rows.value.length === 0
   error.value = ''
   try {
     const resp = await fetchBoardOverview(activeType.value)
+    // 响应已过期（期间切换了一级/二级）：不覆盖新类型的 rows，
+    // 也不进入 diffFlips 产生幽灵翻红/翻绿事件
+    if (my !== overviewSeq) return
     rows.value = resp.rows
     lastRefresh.value = new Date().toLocaleTimeString('zh-CN', { hour12: false })
     diffFlips(resp.rows)
   } catch (e) {
+    if (my !== overviewSeq) return
     error.value = formatError(e)
   } finally {
-    loading.value = false
+    if (my === overviewSeq) loading.value = false
   }
 }
 

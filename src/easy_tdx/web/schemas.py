@@ -2,10 +2,37 @@
 
 from __future__ import annotations
 
+import math
 from enum import IntEnum
 from typing import Any
 
 from pydantic import BaseModel, Field
+
+
+def _json_safe(v: Any) -> Any:
+    """递归把值清洗为 JSON 原生类型：NaN/±inf → None、datetime → ISO 串、
+    numpy 标量 → Python 原生、容器逐项处理。
+
+    Starlette 的 JSONResponse 以 ``allow_nan=False`` 序列化，任何 NaN/inf
+    漏出去都会让整个响应 500（v1.32 实测：/board-mac/overview 某行
+    sort_value=NaN → 全端点 500 且带毒 payload 入 15s 缓存）。所有
+    DictResponse / 缓存写入路径都应先过本函数。
+    """
+    # bool 是 int 子类，须先判
+    if v is None or isinstance(v, bool | str | int):
+        return v
+    if isinstance(v, float):
+        return None if (math.isnan(v) or math.isinf(v)) else v
+    if hasattr(v, "isoformat"):  # datetime/date/pd.Timestamp
+        return v.isoformat()
+    if hasattr(v, "item"):  # numpy 标量（含 np.float32 NaN）
+        return _json_safe(v.item())
+    if isinstance(v, dict):
+        return {str(k): _json_safe(val) for k, val in v.items()}
+    if isinstance(v, list | tuple):
+        return [_json_safe(item) for item in v]
+    return v
+
 
 # ---------------------------------------------------------------------------
 # Enums — mirror easy_tdx.models.enums but as string-based for REST clarity
@@ -143,19 +170,15 @@ class DictResponse(BaseModel):
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> DictResponse:
-        """序列化 dict，将其中的 DataFrame 转为 records 格式。"""
+        """序列化 dict：DataFrame 转 records，值递归清洗（NaN/inf → null 等）。"""
         import pandas as pd
 
         cleaned: dict[str, Any] = {}
         for k, v in d.items():
             if isinstance(v, pd.DataFrame):
                 cleaned[k] = DataFrameResponse.from_dataframe(v).data
-            elif hasattr(v, "isoformat"):
-                cleaned[k] = v.isoformat()
-            elif hasattr(v, "item"):
-                cleaned[k] = v.item()
             else:
-                cleaned[k] = v
+                cleaned[k] = _json_safe(v)
         return cls(data=cleaned)
 
 

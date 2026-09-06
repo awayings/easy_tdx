@@ -18,9 +18,9 @@
 - ``_run`` 写状态时**不假设** ``self._tasks[task_id]`` 仍在表中——并发淘汰
   可能在任务运行期间移除其条目。``move_to_end`` 用 try/except 容忍，状态
   写到本地 ``state`` 引用（即使被淘汰也无害，GC 回收）。
-- ``_evict_if_needed_locked`` 跳过 ``running`` 状态的任务——正在执行的任务
-  恰好是 OrderedDict 头部（完成时才 move_to_end），盲目 FIFO 淘汰会优先
-  杀掉在途任务。淘汰改用「最旧的 non-running 条目」。
+- ``_evict_if_needed_locked`` 只淘汰 ``done/failed`` 终态条目——pending 尚未
+  起跑（淘汰会产生 worker 跳过 + 查询侧恢复成永久 pending 的"幽灵任务"），
+  running 在途；无终态可淘汰时宁可持续超限。
 """
 
 from __future__ import annotations
@@ -156,11 +156,15 @@ class BacktestTaskRunner:
         with self._lock:
             memory_items = list(self._tasks.values())
         seen = {s.task_id for s in memory_items}
-        # 磁盘侧多取一些（覆盖内存 LRU 已淘汰的），再合并排序
+        # 磁盘侧多取一些（覆盖内存 LRU 已淘汰的），再合并排序；列表页不需要
+        # result，懒加载跳过 result_json 的 SELECT 与解析（几百条大结果时
+        # 可观省内存与事件循环停顿）
         try:
             disk_items = [
                 self._dict_to_state(d)
-                for d in get_task_store().list_recent(limit=limit + len(seen))
+                for d in get_task_store().list_recent(
+                    limit=limit + len(seen), include_results=False
+                )
                 if d["task_id"] not in seen
             ]
         except Exception:  # noqa: BLE001 — 持久化故障不阻断列表查询
@@ -284,20 +288,20 @@ class BacktestTaskRunner:
         )
 
     def _evict_if_needed_locked(self) -> None:
-        """超过上限时丢弃最旧的 non-running 任务（调用方需持锁）。
+        """超过上限时丢弃最旧的终态（done/failed）任务（调用方需持锁）。
 
-        running 任务不会被淘汰（它们恰在 OrderedDict 头部，但盲淘汰会杀在途任务）。
-        只淘汰 pending/done/failed 中最旧者。
+        pending/running 一律不淘汰：淘汰尚未起跑的 pending 会造成"幽灵任务"——
+        worker 线程随后取不到状态直接跳过，磁盘遗留的 pending 行会被查询
+        恢复成永远 pending。全为在途任务时宁可不淘汰（超限跳过）。
         """
         while len(self._tasks) > self._max_results:
-            # 找第一个 non-running 条目淘汰；若无则停止（全在 running，不强制淘汰）
             evict_id: str | None = None
             for tid, st in self._tasks.items():
-                if st.status != "running":
+                if st.status in ("done", "failed"):
                     evict_id = tid
                     break
             if evict_id is None:
-                break  # 全部 running，暂时无法淘汰
+                break  # 无终态条目可淘汰
             self._tasks.pop(evict_id, None)
 
 

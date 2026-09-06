@@ -160,6 +160,309 @@ class TestClient:
         assert result["ok"] is False and "API Key" in result["error"]
 
 
+class TestApiUrlSchemeGuard:
+    """api_url SSRF 防线：仅允许 http/https、禁止携带 userinfo。
+
+    背景：_post_json 用 urllib 直连用户可配的 api_url，无 scheme 白名单时
+    ``file:///...`` 可读本地文件（llm.json 内含明文 key，且格式异常分支会
+    回显响应前 300 字节）、``ftp://`` 与内网 http 可被当跳板。
+    """
+
+    def test_file_scheme_rejected(self):
+        with pytest.raises(ValueError, match="http"):
+            resolve_config(
+                LlmConfig(provider="custom", api_url="file:///C:/Users/x/llm.json", model="m")
+            )
+
+    def test_ftp_scheme_rejected(self):
+        with pytest.raises(ValueError, match="http"):
+            resolve_config(LlmConfig(provider="custom", api_url="ftp://internal-host/x", model="m"))
+
+    def test_missing_scheme_rejected(self):
+        with pytest.raises(ValueError, match="http"):
+            resolve_config(LlmConfig(provider="custom", api_url="api.deepseek.com/v1", model="m"))
+
+    def test_userinfo_rejected(self):
+        with pytest.raises(ValueError, match="user:pass"):
+            resolve_config(
+                LlmConfig(provider="custom", api_url="https://user:pass@api.x.com/v1", model="m")
+            )
+
+    def test_http_https_case_insensitive_allowed(self):
+        r = resolve_config(LlmConfig(provider="custom", api_url="HTTPS://Api.X.com/v1", model="m"))
+        assert r.api_url == "HTTPS://Api.X.com/v1"
+        r2 = resolve_config(
+            LlmConfig(provider="custom", api_url="http://gw.local:8000/v1", model="m")
+        )
+        assert r2.api_url == "http://gw.local:8000/v1"
+
+    def test_preset_urls_still_resolve(self, config_dir):
+        save_config(LlmConfig(provider="deepseek", api_key="sk-x-1234567890"))
+        r = resolve_config()
+        assert r.api_url == "https://api.deepseek.com/v1"
+
+
+class TestHttpPostHardening:
+    """HTTP 层加固：错误不回显原始 body、响应体大小上限。"""
+
+    def _raise_http_error(self, body: bytes, code: int = 401):
+        import io
+        import urllib.error
+
+        def fake_urlopen(req, timeout):
+            raise urllib.error.HTTPError(
+                req.full_url, code, "Unauthorized", hdrs=None, fp=io.BytesIO(body)
+            )
+
+        return fake_urlopen
+
+    def test_http_error_extracts_provider_message_only(self, monkeypatch):
+        """错误响应只回显 provider 的 error.message，不回显原始 body 其他内容。"""
+        import json as _json
+
+        body = _json.dumps(
+            {"error": {"message": "Invalid API key", "internal_hint": "SECRET-STACK"}}
+        ).encode()
+        monkeypatch.setattr(llm_mod.urllib.request, "urlopen", self._raise_http_error(body))
+        with pytest.raises(LlmError) as ei:
+            llm_mod._post_json("https://x/v1/chat/completions", {}, {"m": 1}, 5.0)
+        assert ei.value.status == 401
+        assert "Invalid API key" in str(ei.value)
+        assert "SECRET-STACK" not in str(ei.value)
+
+    def test_http_error_non_json_body_is_generic(self, monkeypatch):
+        """非 JSON 错误页不给原始内容，只给通用 HTTP 状态描述。"""
+        body = b"<html><h1>gateway exploded with internal detail</h1></html>"
+        monkeypatch.setattr(llm_mod.urllib.request, "urlopen", self._raise_http_error(body))
+        with pytest.raises(LlmError) as ei:
+            llm_mod._post_json("https://x/v1/chat/completions", {}, {"m": 1}, 5.0)
+        assert "gateway exploded" not in str(ei.value)
+        assert "401" in str(ei.value)
+
+    def test_http_error_string_error_field_still_shown(self, monkeypatch):
+        """error 为字符串的网关（如 {"error":"bad key"}）仍展示该消息。"""
+        monkeypatch.setattr(
+            llm_mod.urllib.request, "urlopen", self._raise_http_error(b'{"error":"bad key"}')
+        )
+        with pytest.raises(LlmError, match="bad key") as ei:
+            llm_mod._post_json("https://x/v1/chat/completions", {}, {"m": 1}, 5.0)
+        assert ei.value.status == 401
+
+    def test_response_body_size_capped(self, config_dir, monkeypatch):
+        """超过 2MB 的响应体中止解析（防异常网关撑爆内存），报可操作错误。"""
+
+        class _FakeResp:
+            def __init__(self, payload: bytes) -> None:
+                self._buf = payload
+
+            def read(self, n: int = -1) -> bytes:
+                if n < 0:
+                    data, self._buf = self._buf, b""
+                    return data
+                data, self._buf = self._buf[:n], self._buf[n:]
+                return data
+
+            def __enter__(self) -> _FakeResp:
+                return self
+
+            def __exit__(self, *exc: object) -> bool:
+                return False
+
+        big = b"x" * (llm_mod._MAX_RESPONSE_BYTES + 1)
+        monkeypatch.setattr(llm_mod.urllib.request, "urlopen", lambda req, timeout: _FakeResp(big))
+        with pytest.raises(LlmError, match="过大|上限"):
+            llm_mod._post_json("https://x/v1/chat/completions", {}, {"m": 1}, 5.0)
+
+    def test_normal_response_within_cap_parses(self, config_dir, monkeypatch):
+        class _FakeResp:
+            def __init__(self, payload: bytes) -> None:
+                self._buf = payload
+
+            def read(self, n: int = -1) -> bytes:
+                if n < 0:
+                    data, self._buf = self._buf, b""
+                    return data
+                data, self._buf = self._buf[:n], self._buf[n:]
+                return data
+
+            def __enter__(self) -> _FakeResp:
+                return self
+
+            def __exit__(self, *exc: object) -> bool:
+                return False
+
+        payload = b'{"choices": [{"message": {"content": "OK"}}]}'
+        monkeypatch.setattr(
+            llm_mod.urllib.request, "urlopen", lambda req, timeout: _FakeResp(payload)
+        )
+        data = llm_mod._post_json("https://x/v1/chat/completions", {}, {"m": 1}, 5.0)
+        assert data["choices"][0]["message"]["content"] == "OK"
+
+
+class TestSaveConfigAtomic:
+    def test_replace_failure_preserves_old_file(self, config_dir, monkeypatch):
+        """os.replace 失败（磁盘满等）时旧配置原样保留，不留临时文件。"""
+        save_config(LlmConfig(provider="deepseek", api_key="sk-old-1234567890"))
+
+        def boom(src, dst):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(llm_mod.os, "replace", boom)
+        with pytest.raises(OSError):
+            save_config(LlmConfig(provider="kimi", api_key="sk-new-9999999999"))
+
+        assert load_config().api_key == "sk-old-1234567890"  # 旧配置未被破坏
+        leftovers = [p.name for p in config_dir.iterdir() if p.name != "llm.json"]
+        assert leftovers == []  # 失败的临时文件已清理
+
+
+class TestLoadConfigFieldDefense:
+    """手工编辑 llm.json 的脏字段不得打挂 load_config（全部 /llm/* 依赖它）。"""
+
+    def test_null_fields_fall_back_to_defaults(self, config_dir):
+        import json as _json
+
+        (config_dir / "llm.json").write_text(
+            _json.dumps(
+                {
+                    "provider": None,
+                    "api_url": None,
+                    "api_key": None,
+                    "model": None,
+                    "temperature": None,
+                    "max_tokens": None,
+                    "timeout": None,
+                    "system_prompt": None,
+                }
+            ),
+            encoding="utf-8",
+        )
+        cfg = load_config()  # 旧码：float(None) TypeError
+        assert cfg.provider == "deepseek"
+        assert cfg.api_url == "" and cfg.api_key == "" and cfg.model == ""
+        assert cfg.temperature == 0.3
+        assert cfg.max_tokens == 16000
+        assert cfg.timeout == 180.0
+        assert cfg.system_prompt == LlmConfig.system_prompt
+
+    def test_wrong_types_fall_back_with_warning(self, config_dir, caplog):
+        import json as _json
+
+        (config_dir / "llm.json").write_text(
+            _json.dumps(
+                {
+                    "temperature": "abc",
+                    "max_tokens": "fast",
+                    "timeout": [],
+                    "provider": 123,
+                    "system_prompt": 456,
+                }
+            ),
+            encoding="utf-8",
+        )
+        with caplog.at_level("WARNING", logger="easy_tdx.ai.llm"):
+            cfg = load_config()  # 旧码：float("abc") ValueError
+        assert cfg.temperature == 0.3
+        assert cfg.max_tokens == 16000
+        assert cfg.timeout == 180.0
+        assert cfg.provider == "deepseek"  # 非字符串 provider 回退默认
+        assert cfg.system_prompt == LlmConfig.system_prompt
+        assert any("temperature" in r.message for r in caplog.records)
+
+    def test_non_finite_and_out_of_range_fall_back(self, config_dir):
+        import json as _json
+
+        (config_dir / "llm.json").write_text(
+            _json.dumps({"temperature": 1e999, "timeout": -5, "max_tokens": 0}),  # 1e999→inf
+            encoding="utf-8",
+        )
+        cfg = load_config()  # 旧码：inf temperature 会一路写进请求 payload
+        assert cfg.temperature == 0.3
+        assert cfg.timeout == 180.0
+        assert cfg.max_tokens == 16000
+
+    def test_string_numbers_leniently_coerced(self, config_dir):
+        import json as _json
+
+        (config_dir / "llm.json").write_text(
+            _json.dumps({"temperature": "0.7", "max_tokens": "8192.9", "timeout": "60"}),
+            encoding="utf-8",
+        )
+        cfg = load_config()
+        assert cfg.temperature == 0.7
+        assert cfg.max_tokens == 8192
+        assert cfg.timeout == 60.0
+
+
+class TestAnthropicRobustness:
+    """anthropic 协议与 openai 口径对齐：绝不静默返回空正文。"""
+
+    def _client(self) -> LlmClient:
+        return LlmClient(LlmConfig(provider="claude", api_key="sk-ant-123456789"))
+
+    def test_thinking_only_blocks_raise_actionable(self, config_dir, monkeypatch):
+        """仅 thinking 块（max_tokens 被思考耗尽）→ 可操作错误，而非空串成功。"""
+
+        def fake_post(url, headers, payload, timeout):
+            return {
+                "content": [{"type": "thinking", "thinking": "思考" * 200}],
+                "stop_reason": "max_tokens",
+            }
+
+        monkeypatch.setattr(llm_mod, "_post_json", fake_post)
+        with pytest.raises(LlmError, match="思考链"):
+            asyncio.run(self._client().chat("hi"))
+
+    def test_content_as_plain_string_accepted(self, config_dir, monkeypatch):
+        """部分网关把 content 放字符串而非块列表——正常取正文。"""
+
+        def fake_post(url, headers, payload, timeout):
+            return {"content": "纯字符串回复"}
+
+        monkeypatch.setattr(llm_mod, "_post_json", fake_post)
+        assert asyncio.run(self._client().chat("hi")) == "纯字符串回复"
+
+    def test_mixed_blocks_text_extracted(self, config_dir, monkeypatch):
+        def fake_post(url, headers, payload, timeout):
+            return {
+                "content": [
+                    {"type": "thinking", "thinking": "思考"},
+                    {"type": "text", "text": "正文"},
+                ],
+                "stop_reason": "end_turn",
+            }
+
+        monkeypatch.setattr(llm_mod, "_post_json", fake_post)
+        assert asyncio.run(self._client().chat("hi")) == "正文"
+
+    def test_missing_content_raises_llm_error(self, config_dir, monkeypatch):
+        """content 缺失 → LlmError（旧码 AttributeError 裸 500）。"""
+
+        def fake_post(url, headers, payload, timeout):
+            return {"stop_reason": "end_turn"}
+
+        monkeypatch.setattr(llm_mod, "_post_json", fake_post)
+        with pytest.raises(LlmError, match="格式异常"):
+            asyncio.run(self._client().chat("hi"))
+
+    def test_empty_blocks_generic_error_without_raw_echo(self, config_dir, monkeypatch):
+        def fake_post(url, headers, payload, timeout):
+            return {"content": [{"type": "tool_use", "id": "tool_1", "secret": "S3CR3T"}]}
+
+        monkeypatch.setattr(llm_mod, "_post_json", fake_post)
+        with pytest.raises(LlmError, match="content 为空") as ei:
+            asyncio.run(self._client().chat("hi"))
+        assert "S3CR3T" not in str(ei.value)  # 不回显原始响应体
+
+    def test_empty_string_content_with_max_tokens_stop(self, config_dir, monkeypatch):
+        def fake_post(url, headers, payload, timeout):
+            return {"content": "", "stop_reason": "max_tokens"}
+
+        monkeypatch.setattr(llm_mod, "_post_json", fake_post)
+        with pytest.raises(LlmError, match="截断"):
+            asyncio.run(self._client().chat("hi"))
+
+
 def test_provider_presets_cover_major_vendors():
     vendors = [
         "deepseek",

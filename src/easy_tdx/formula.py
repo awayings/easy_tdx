@@ -43,6 +43,10 @@ import pandas as pd
 
 __all__ = ["FormulaError", "FormulaResult", "CompiledFormula", "compile_formula"]
 
+# 表达式嵌套深度上限（递归下降防爆栈：每层约 8 个 Python 栈帧，100 层
+# 远低于 CPython 默认递归上限，超出按 FormulaError 报错而非 RecursionError）
+_MAX_EXPRESSION_DEPTH = 100
+
 # ── Token ─────────────────────────────────────────────────────────────────────
 
 _TOKEN_RE = re.compile(
@@ -108,6 +112,7 @@ class _Parser:
     def __init__(self, tokens: list[_Token]) -> None:
         self._tokens = tokens
         self._i = 0
+        self._depth = 0
 
     def _peek(self) -> _Token:
         return self._tokens[self._i]
@@ -172,7 +177,13 @@ class _Parser:
 
     # 表达式优先级：OR < AND < 比较 < 加减 < 乘除 < 一元 < 原子
     def parse_expression(self) -> _Node:
-        return self._parse_or()
+        self._depth += 1
+        if self._depth > _MAX_EXPRESSION_DEPTH:
+            raise FormulaError(f"公式嵌套过深（超过 {_MAX_EXPRESSION_DEPTH} 层）")
+        try:
+            return self._parse_or()
+        finally:
+            self._depth -= 1
 
     def _parse_or(self) -> _Node:
         left = self._parse_and()
@@ -213,15 +224,22 @@ class _Parser:
         return left
 
     def _parse_unary(self) -> _Node:
-        if tok := self._match_op("-", "+"):
+        tok = self._match_op("-", "+", "!", "NOT")
+        if tok is None:
+            return self._parse_primary()
+        # 一元运算符链也计入深度（防 "!!!!…" 型超长链爆栈）
+        self._depth += 1
+        if self._depth > _MAX_EXPRESSION_DEPTH:
+            raise FormulaError(f"公式嵌套过深（超过 {_MAX_EXPRESSION_DEPTH} 层）")
+        try:
             child = self._parse_unary()
-            if tok.value == "-":
-                return _Node(kind="un", value="neg", children=[child])
-            return child
-        if tok := self._match_op("!", "NOT"):
-            child = self._parse_unary()
+        finally:
+            self._depth -= 1
+        if tok.value == "-":
+            return _Node(kind="un", value="neg", children=[child])
+        if tok.value in ("!", "NOT"):
             return _Node(kind="un", value="not", children=[child])
-        return self._parse_primary()
+        return child  # 一元正号
 
     def _parse_primary(self) -> _Node:
         tok = self._peek()
@@ -319,6 +337,18 @@ def _build_functions() -> dict[str, Callable[..., Any]]:
     ):
         if hasattr(mytt, name):
             fns[name] = getattr(mytt, name)
+
+    # REF 负移位 = 引用未来数据（未来函数），显式禁止。此前仅靠负数字面量
+    # 经一元负号转成 float 在 pandas 层报错这一巧合拦截。MyTT 库内直调
+    # （如 ICHIMOKU 迟行带画图 REF(C, -SHIFT)）不走公式白名单，不受影响。
+    def _ref_no_lookahead(S: Any, N: Any = 1) -> Any:
+        n_arr = np.asarray(N)
+        if n_arr.size and float(np.min(n_arr)) < 0:
+            raise FormulaError(f"REF 不允许负移位（引用未来数据）：N={N}")
+        return mytt.REF(S, N)
+
+    fns["REF"] = _ref_no_lookahead
+
     # numpy 补齐（TDX 语义）
     fns["POW"] = np.power
     fns["SQRT"] = np.sqrt
@@ -373,7 +403,10 @@ class _Evaluator:
 
     @staticmethod
     def _is_boolean(expr: _Node, val: Any) -> bool:
-        """输出归类：比较/逻辑/CROSS 节点或 0/1 值域 → 信号列。"""
+        """输出归类：比较/逻辑/CROSS 节点 → 信号列；否则仅当全部有限值
+        ∈ {0.0, 1.0} 才兜底判为信号（真 0/1 布尔指标）——含其他小数的
+        连续值（价格比率、归一化振荡器等）一律归数值列。
+        """
         if expr.kind in ("cmp", "logic"):
             return True
         if expr.kind == "call" and expr.value in _BOOL_FUNCS:
@@ -382,7 +415,7 @@ class _Evaluator:
         finite = arr[np.isfinite(arr)]
         if finite.size == 0:
             return False
-        return bool(finite.min() >= 0.0 and finite.max() <= 1.0)
+        return bool(np.all((finite == 0.0) | (finite == 1.0)))
 
     def eval(self, node: _Node) -> Any:
         if node.kind == "num":

@@ -290,6 +290,51 @@ class TestPortfolioFullMetrics:
         )
         assert result.total_performance["total_return"] == pytest.approx(weighted, abs=1e-9)
 
+    def test_total_return_capital_weighted_with_uneven_start_dates(self) -> None:
+        """晚上市标的建仓前应按初始资金趴账（合并曲线首值=总投入资金）。
+
+        回归：旧实现 ``_build_combined_equity`` 对日期并集的前导缺口填 0——
+        晚上市标的上市前贡献 0 而非其分得的初始资金，合并曲线首值 < 总投入，
+        total_return 被系统性虚增（100 根 + 晚 60 根起步的组合实测虚增约 10 倍）。
+        正确口径（与组合 Walk-Forward 的 ffill().bfill() 一致）：前导缺口用
+        每列首个有效值回填——资金在组合起点即已分配，建仓前趴账。
+        """
+        n = 100
+        close = np.linspace(10.0, 12.0, n)
+        dates = pd.bdate_range("2024-01-02", periods=n)
+
+        def _mk(cnt: int) -> pd.DataFrame:
+            c = close[-cnt:]
+            return pd.DataFrame(
+                {
+                    "datetime": dates[-cnt:],
+                    "open": c,
+                    "high": c,
+                    "low": c,
+                    "close": c,
+                    "vol": 1e6,
+                    "amount": c * 1e6,
+                }
+            )
+
+        stocks = [
+            StockData("000001", "SZ", _mk(n)),  # 全程 100 根
+            StockData("600000", "SH", _mk(40)),  # 同涨势、晚 60 根起步
+        ]
+        result = PortfolioBacktestEngine(
+            strategy=SimpleBuyStrategy, stocks=stocks, total_cash=200000
+        ).run()
+
+        # 1) 合并曲线首值 = 总投入资金（旧实现 = 100000，缺晚上市标的的资金）
+        assert result.combined_equity["total"].iloc[0] == pytest.approx(200000.0)
+
+        # 2) total_return == 各标的资金加权真实收益
+        weighted = sum(
+            0.5 * res.performance.get("total_return", 0.0)
+            for res in result.individual_results.values()
+        )
+        assert result.total_performance["total_return"] == pytest.approx(weighted, abs=1e-9)
+
     def test_to_dict_contains_trades(self) -> None:
         """to_dict 应包含组合层成交表（REST/AI 解读消费）。"""
         stocks = [StockData("000001", "SZ", _make_df(100, seed=42))]

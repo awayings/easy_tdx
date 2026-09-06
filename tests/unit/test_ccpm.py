@@ -177,6 +177,38 @@ def test_parse_xml_error_page_raises() -> None:
         parse_xml("404 page，非 XML 内容")
 
 
+def test_parse_xml_structure_change_raises() -> None:
+    """XML 合法但 0 个 <data> 节点且存在其他子结构：抛 CcpmError（官网改版信号）。
+
+    回归：旧实现静默返回空表——改版后 CLI/Web 层展示"无数据"而非报错，
+    改版长期无人察觉。正常发布日必有 <data>；真实无数据日走 302。
+    """
+    from easy_tdx.ccpm import CcpmError, parse_xml
+
+    changed = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        "<positionRank><record><instrumentid>IF2609</instrumentid></record></positionRank>"
+    )
+    with pytest.raises(CcpmError, match="结构可能已变更"):
+        parse_xml(changed)
+
+
+def test_parse_xml_empty_root_is_no_data() -> None:
+    """空 <positionRank/>（无任何子节点）：按当日无数据处理，返回空表。"""
+    from easy_tdx.ccpm import parse_xml
+
+    assert parse_xml('<?xml version="1.0" encoding="UTF-8"?><positionRank></positionRank>') == []
+
+
+def test_get_rank_structure_change_raises(isolated_config, monkeypatch) -> None:
+    """结构变更经 get_rank 透传为 CcpmError（不缓存、不返回空表伪装成功）。"""
+    from easy_tdx.ccpm import CcpmClient, CcpmError
+
+    _mock_fetch(monkeypatch, sample="<positionRank><unknown>1</unknown></positionRank>")
+    with pytest.raises(CcpmError, match="结构可能已变更"):
+        CcpmClient().get_rank("IF", "2026-09-02")
+
+
 # ---------------------------------------------------------------------------
 # 日期归一化
 # ---------------------------------------------------------------------------

@@ -139,16 +139,24 @@ const membersLoading = ref(false)
 // 后端单页 80 自动翻页，1000 覆盖最大概念板块，拉满后按成员清单自然终止。
 const MEMBER_FETCH_COUNT = 1000
 
+/** 请求序号守卫：升/降序快速连点、或 props.code 切换时，旧响应直接丢弃。 */
+let memberSeq = 0
+
 async function loadMembers() {
+  const my = ++memberSeq
   membersLoading.value = true
   membersError.value = ''
   try {
-    members.value = await fetchBoardMembers(props.code, MEMBER_FETCH_COUNT, memberOrder.value)
+    const rows = await fetchBoardMembers(props.code, MEMBER_FETCH_COUNT, memberOrder.value)
+    // 响应已过期（顺序已再切换 / 板块已切换）：不得覆盖新请求的结果
+    if (my !== memberSeq) return
+    members.value = rows
   } catch (e) {
+    if (my !== memberSeq) return
     members.value = []
     membersError.value = formatError(e)
   } finally {
-    membersLoading.value = false
+    if (my === memberSeq) membersLoading.value = false
   }
 }
 

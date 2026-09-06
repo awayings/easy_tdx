@@ -115,6 +115,16 @@ def backtest(
 
     # 1. 加载策略（单策略 or 多因子组合）
     is_combo = combo_strategies is not None
+    # 组合模式暂不支持的分析旗标：显式告警而非静默吞掉（审查修复）
+    if is_combo and walk_forward:
+        click.echo(
+            "警告: --wf（Walk-Forward 样本外验证）暂不支持 --combo-strategies 组合模式，已忽略",
+            err=True,
+        )
+    if is_combo and full_evaluate:
+        click.echo(
+            "警告: --evaluate（一条龙评估）暂不支持 --combo-strategies 组合模式，已忽略", err=True
+        )
 
     if is_combo:
         assert combo_strategies is not None  # narrowed by is_combo
@@ -728,6 +738,13 @@ def optimize(
         raise SystemExit(1)
 
     custom_grid = _parse_param_grid(param_pairs) if param_pairs else None
+    if optimize_all and custom_grid is not None:
+        # --all 逐策略使用各自预设网格，--param 无处安放：显式告警而非静默忽略（审查修复）
+        click.echo(
+            "警告: --param 在 --all 模式下被忽略（一键寻优逐策略使用各自预设网格；"
+            "如需自定义网格请指定 --strategy 单策略寻优）",
+            err=True,
+        )
     if not optimize_all:
         assert strategy_name is not None
         try:

@@ -62,7 +62,7 @@ def test_vipdoc_settings_endpoints(settings_env, tmp_path):
         r = client.put("/api/v1/settings/vipdoc", json={"path": str(real_dir)})
         assert r.status_code == 200
         assert r.json()["stored"] == str(real_dir)
-        assert market_mod._limitup_cache is None
+        assert market_mod._limitup_cache == {}
 
         # GET 回读
         assert client.get("/api/v1/settings/vipdoc").json()["stored"] == str(real_dir)

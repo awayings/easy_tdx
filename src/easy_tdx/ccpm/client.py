@@ -174,6 +174,20 @@ def parse_xml(text: str) -> list[dict[str, Any]]:
             "product": _g(node, "productid"),
         }
 
+    if not cells:
+        if len(root) > 0:
+            # XML 合法但 0 个 <data> 数据节点，且根元素下存在其他子结构——
+            # 官网模板/字段改版的典型形态（正常发布日必有 <data>；真实
+            # 「无数据日」走 302 → CcpmNoDataError）。静默返回空表会让
+            # 改版长期伪装成"无数据"，这里显式报错。
+            tags = ",".join(sorted({child.tag for child in root}))[:200]
+            raise CcpmError(
+                f"XML 解析出 0 条 <data> 数据节点（根元素 <{root.tag}>，"
+                f"子节点: {tags}）——中金所页面结构可能已变更"
+            )
+        # 根元素无任何子节点（如空 <positionRank/>）：按当日无数据处理
+        return []
+
     rows: list[dict[str, Any]] = []
     ranks = sorted({r for (_, _, r) in cells})
     for instrument in sorted(meta):

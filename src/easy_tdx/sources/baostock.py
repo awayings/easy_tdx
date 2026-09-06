@@ -8,19 +8,27 @@
   即启用；未安装时本模块整体静默关闭，核心功能零影响。
 - baostock 客户端是单条全局连接且非线程安全，本模块内部全程持锁串行，
   供 async 调用方经 ``asyncio.to_thread`` 使用。
-- 数据口径：volume 为股（与 /bars 输出契约一致，无需换算）；停牌日
-  （tradestatus=0 或 volume=0）剔除，与通达信 K 线不含停牌日的口径对齐；
-  复权经 adjustflag 原生支持（QFQ/HFQ/NONE），North Exchange（BJ）不覆盖。
+- 数据口径：个股 volume 为股（与 /bars 输出契约一致，无需换算）；指数
+  经 ``is_index=True`` 显式声明后 vol ÷100 转为手（baostock 指数 volume
+  单位为股，而 /bars/index 契约为手）；停牌日（tradestatus=0 或
+  volume=0）剔除，与通达信 K 线不含停牌日的口径对齐；复权经 adjustflag
+  原生支持（QFQ/HFQ/NONE），North Exchange（BJ）不覆盖。
+- 拉取失败（登录失败 / 查询 error_code≠0）记 warning 日志并抛
+  ``RuntimeError``——auto 兜底路径以 except 包裹调用不受影响，
+  ``--source baostock`` 显式使用时不会被伪装成"无数据"。
 """
 
 from __future__ import annotations
 
 import importlib
+import logging
 import os
 import threading
 from datetime import datetime, timedelta
 
 import pandas as pd
+
+logger = logging.getLogger(__name__)
 
 BAOSTOCK_DISABLE_ENV = "EASY_TDX_BAOSTOCK"
 
@@ -33,6 +41,10 @@ _LOCK_TIMEOUT_SECONDS = 30.0
 
 # 支持兜底的周期（baostock frequency）：日线及以上；分钟线/季年线不兜
 _FREQ_BY_CATEGORY: dict[str, str] = {"DAY": "d", "WEEK": "w", "MONTH": "m"}
+# 请求字段：baostock 周线/月线不支持 tradestatus（实测 error_code=10004012
+# 「周线指标参数传入错误:tradestatus」，2026-09-06），仅日线可传。
+_FIELDS_DAILY = "date,open,high,low,close,volume,amount,tradestatus"
+_FIELDS_WEEKLY = "date,open,high,low,close,volume,amount"
 # 复权映射：baostock adjustflag — 1=后复权 2=前复权 3=不复权
 _ADJUST_FLAG = {"NONE": "3", "QFQ": "2", "HFQ": "1"}
 _MARKET_PREFIX = {"SZ": "sz", "SH": "sh"}  # BJ baostock 不覆盖
@@ -85,6 +97,7 @@ def fetch_bars(
     start: int,
     count: int,
     adjust: str,
+    is_index: bool = False,
 ) -> pd.DataFrame | None:
     """拉取日线及以上 K 线，输出对齐 /bars 契约的 DataFrame。
 
@@ -95,11 +108,19 @@ def fetch_bars(
         start: 跳过最新 start 根（与 TDX offset 语义一致）。
         count: 最多返回 count 根。
         adjust: "NONE" / "QFQ" / "HFQ"。
+        is_index: 标的是指数（如 sh.000001）。baostock 指数 volume 单位为
+            股，而 /bars/index 输出契约为手（通达信指数日线原样、周/月
+            ×100 还原后均为手）——True 时 vol ÷100 转手。实测
+            sh.000001 2026-09-04：volume=53,728,616,100 股
+            ÷100 = 537,286,161 手。
 
     Returns:
         按 [date, open, close, high, low, vol, amount] 列序、时间升序的
-        DataFrame；兜底不可用 / 不适用 / 无数据时返回 None（调用方继续
-        维持原错误，不吞异常）。
+        DataFrame；兜底不可用 / 不适用 / 无数据时返回 None。
+
+    Raises:
+        RuntimeError: baostock 登录或查询失败（已记 warning 日志）。auto
+            兜底调用方以 except 包裹即可维持原错误路径。
     """
     global _logged_in
     if not is_enabled():
@@ -116,46 +137,47 @@ def fetch_bars(
     coef, buffer_days = _WINDOW_DAYS[frequency]
     end_date = datetime.now()
     start_date = end_date - timedelta(days=total * coef + buffer_days)
+    fields = _FIELDS_DAILY if frequency == "d" else _FIELDS_WEEKLY
 
     # baostock 全局单连接：持锁串行；等待超时则放弃本次兜底
     if not _bs_lock.acquire(timeout=_LOCK_TIMEOUT_SECONDS):
         return None
     try:
         bs = importlib.import_module("baostock")
-        try:
-            _login_if_needed(bs)
-            rows = _query_rows(
-                bs,
-                code=f"{prefix}.{code}",
-                fields="date,open,high,low,close,volume,amount,tradestatus",
-                start_date=start_date.strftime("%Y-%m-%d"),
-                end_date=end_date.strftime("%Y-%m-%d"),
-                frequency=frequency,
-                adjustflag=adjustflag,
-            )
-        except Exception:
-            # 连接可能中途断开：重置登录态，下次兜底重新登录
-            _logged_in = False
-            raise
-    except Exception:
-        # 兜底源自身的任何失败都不向上抛：调用方按"无兜底数据"处理
-        return None
+        _login_if_needed(bs)
+        rows = _query_rows(
+            bs,
+            code=f"{prefix}.{code}",
+            fields=fields,
+            start_date=start_date.strftime("%Y-%m-%d"),
+            end_date=end_date.strftime("%Y-%m-%d"),
+            frequency=frequency,
+            adjustflag=adjustflag,
+        )
+    except Exception as exc:
+        # 连接可能中途断开：重置登录态，下次兜底重新登录。
+        # 真故障记日志并上抛——auto 兜底调用方（/bars 的 except 分支）接住
+        # 后维持原错误；显式 --source baostock 不会被伪装成"无数据"。
+        _logged_in = False
+        logger.warning("baostock 拉取失败（%s.%s %s）：%s", prefix, code, frequency, exc)
+        raise RuntimeError(f"baostock 拉取失败: {exc}") from exc
     finally:
         _bs_lock.release()
 
     if not rows:
         return None
-    df = pd.DataFrame(
-        rows, columns=["date", "open", "high", "low", "close", "vol", "amount", "tradestatus"]
-    )
+    df = pd.DataFrame(rows, columns=fields.split(",")).rename(columns={"volume": "vol"})
     for col in ("open", "high", "low", "close", "vol", "amount"):
         df[col] = pd.to_numeric(df[col], errors="coerce")
-    # 停牌日剔除（tradestatus=0 或无成交），对齐通达信 K 线不含停牌日的口径
+    # 停牌日剔除（tradestatus=0 或无成交），对齐通达信 K 线不含停牌日的口径。
+    # W/M 无 tradestatus 列（baostock 不支持），停牌周/月靠 vol>0 兜底剔除。
     if "tradestatus" in df.columns:
         df = df[df["tradestatus"] != "0"]
     df = df.dropna(subset=["close"])
     df = df[df["close"] > 0]
     df = df[df["vol"] > 0]
+    if is_index:
+        df["vol"] = df["vol"] / 100.0  # 股 → 手，见 docstring is_index 说明
     if df.empty:
         return None
     df["date"] = pd.to_datetime(df["date"]).dt.normalize()

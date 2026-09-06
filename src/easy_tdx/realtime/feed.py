@@ -212,7 +212,11 @@ class RealtimeDataFeed:
                 :meth:`stop`。
         """
         if self._stop_requested:
-            return  # 启动前已请求停止（见 __init__ 的竞态说明）
+            # 启动前已请求停止（见 __init__ 的竞态说明）：消费该一次性标志并
+            # 立即退出；复位后同一实例可再次 start（修复 start→stop→start
+            # 二次启动被永久静默吞掉的问题）。
+            self._stop_requested = False
+            return
         self._running = True
         try:
             count = 0
@@ -262,7 +266,9 @@ class RealtimeDataFeed:
     async def _run_sync_loop(self, client: Any, max_iterations: int | None) -> None:
         """同步客户端的轮询循环：阻塞调用丢到 executor。"""
         if self._stop_requested:
-            return  # 启动前已请求停止（见 __init__ 的竞态说明）
+            # 同 run_async：消费一次性停止标志并复位（实例可复用）
+            self._stop_requested = False
+            return
         self._running = True
         try:
             count = 0
@@ -279,7 +285,8 @@ class RealtimeDataFeed:
         """请求停止轮询（下一轮 sleep 结束后生效）。
 
         在 ``run_async`` / ``run_sync`` 首次获得调度之前调用同样有效
-        （启动即退出），见 ``__init__`` 的竞态说明。
+        （启动即退出）；该停止请求是一次性的——被某次 run_* 消费后，
+        同一实例可以再次 start。
         """
         self._stop_requested = True
         self._running = False

@@ -134,8 +134,14 @@ class OptimizeBacktestRequest(BaseModel):
     strategy: str = Field(..., description="策略名")
     cash: float = Field(default=1_000_000.0, gt=0)
     commission: float = Field(default=0.0003, ge=0, le=0.01)
+    min_commission: float = Field(default=5.0, ge=0)
+    stamp_tax: float = Field(default=0.001, ge=0, le=0.01)
     slippage: float = Field(default=0.0, ge=0, le=0.05)
     execution: Literal["next_open", "next_close"] = Field(default="next_open")
+    auto_fees: bool = Field(
+        default=False,
+        description="按标的品种自动解析费率（ETF/可转债免印花税等）；显式非默认费率优先",
+    )
     workers: int = Field(
         default=1,
         ge=0,
@@ -304,10 +310,14 @@ class BacktestResultResponse(BaseModel):
 
 
 class TaskSubmitResponse(BaseModel):
-    """后台任务提交响应。"""
+    """后台任务提交响应。
+
+    ``status`` 透传提交瞬间的真实状态：通常是 pending/running；极快任务在
+    拿到响应前可能已 done/failed——如实上报，前端轮询一次即见分晓。
+    """
 
     task_id: str
-    status: Literal["pending", "running"]
+    status: Literal["pending", "running", "done", "failed"]
 
 
 class TaskStateResponse(BaseModel):

@@ -205,6 +205,44 @@ def test_combined_metrics_dd_duration_unclosed_counts_to_end():
     assert m.max_dd_duration == 20
 
 
+def test_combined_metrics_missing_drawdown_pct_row_continues_state():
+    """缺行 drawdown_pct 视为状态延续，不得当作创新高截断水下期。
+
+    回归：compute_combined_metrics 的 drawdown_pct 分支曾把缺行/None 取 0
+    （=创新高），把真实水下段从中间截断，max_dd_duration 被低估（3 → 2）。
+    """
+    eq = [
+        {"total": 100.0, "datetime": "2024-01-01", "drawdown_pct": 0.0},
+        {"total": 50.0, "datetime": "2024-01-02", "drawdown_pct": 0.5},
+        {"total": 50.0, "datetime": "2024-01-03"},  # 缺 drawdown_pct → 沿用水下
+        {"total": 50.0, "datetime": "2024-01-04", "drawdown_pct": 0.5},
+    ]
+    m = compute_combined_metrics(eq)
+    # idx0 之后一直未创新高（缺行延续 idx1 的水下状态）→ 计到末点 = 3
+    assert m.max_dd_duration == 3
+
+
+def test_combined_metrics_nan_drawdown_pct_continues_state():
+    """NaN drawdown_pct 沿用上一根状态：峰值后的 NaN 仍按峰值处理。
+
+    回归：NaN 行既不算峰值也不截断，last_peak 停在上一根真峰值，导致
+    水下期被多算一根（2 → 1）。
+    """
+    eq = [
+        {"total": 100.0, "datetime": "2024-01-01", "drawdown_pct": 0.0},
+        {"total": 110.0, "datetime": "2024-01-02", "drawdown_pct": 0.0},
+        {"total": 110.0, "datetime": "2024-01-03", "drawdown_pct": float("nan")},
+        {
+            "total": 109.0,
+            "datetime": "2024-01-04",
+            "drawdown_pct": (110.0 - 109.0) / 110.0,
+        },
+    ]
+    m = compute_combined_metrics(eq)
+    # NaN 行沿用 idx1 的峰值状态 → 最后一次创新高为 idx2 → 水下 1 根
+    assert m.max_dd_duration == 1
+
+
 def test_combined_metrics_insufficient_points():
     m = compute_combined_metrics([{"total": 100.0}])
     assert m.n_points == 1

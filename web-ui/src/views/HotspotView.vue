@@ -26,7 +26,10 @@ const viewMode = ref<'matrix' | 'corr'>('matrix')
 watch(
   () => props.boardType,
   (t) => {
-    if (t && t !== boardType.value) setType(t)
+    // /styles 路由注入 FG；/hotspots 无 props（undefined）——复用组件实例时
+    // 需回退默认 HY，否则 FG 数据滞留在热点滚动路由下
+    const target = t ?? 'HY'
+    if (target !== boardType.value) setType(target)
   },
 )
 
@@ -48,6 +51,8 @@ const loading = ref(false)
 const lastRefresh = ref('')
 
 let buildTimer = 0
+/** 请求序号守卫：await 后比对，过期响应直接丢弃（不覆盖新类型/新参数的状态）。 */
+let loadSeq = 0
 
 function stopBuildPoll() {
   if (buildTimer) {
@@ -57,8 +62,12 @@ function stopBuildPoll() {
 }
 
 async function load(retry = false) {
+  const my = ++loadSeq
   try {
     const r = await fetchBoardHotspot(boardType.value, days.value, mode.value, PER_DAY, retry)
+    // 响应已过期（期间用户切换了类型/天数/模式）：不得覆盖 resp、不得
+    // 杀死或重启新参数的构建轮询，整体丢弃。
+    if (my !== loadSeq) return
     if (r.status === 'building') {
       buildError.value = ''
       resp.value = null
@@ -78,6 +87,7 @@ async function load(retry = false) {
     loading.value = false
     lastRefresh.value = new Date().toLocaleTimeString('zh-CN', { hour12: false })
   } catch (e) {
+    if (my !== loadSeq) return
     stopBuildPoll()
     buildingProgress.value = null
     buildError.value = formatError(e)

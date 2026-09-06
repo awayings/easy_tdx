@@ -29,6 +29,18 @@ def _config_dir() -> Path:
     return Path(os.environ.get("EASY_TDX_CONFIG_DIR", str(Path.home() / ".easy_tdx")))
 
 
+def _real_or_zero(v: Any) -> float:
+    """数值兜底：None/NaN/inf → 0.0（REAL NOT NULL 列不吃 NaN——SQLite 会把
+    NaN 绑定成 NULL 而触发约束冲突，整条写入失败）。"""
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return 0.0
+    if f != f or f in (float("inf"), float("-inf")):
+        return 0.0
+    return f
+
+
 class SentimentStore:
     """情绪采样 SQLite 存储。"""
 
@@ -116,7 +128,11 @@ class SentimentStore:
             conn.close()
 
     def upsert_fund_day(self, date: int, boards: list[dict[str, Any]]) -> None:
-        """覆盖写入某日行业主力净流入排行（rank 按列表顺序 1 起）。"""
+        """覆盖写入某日行业主力净流入排行（rank 按列表顺序 1 起）。
+
+        ``main_net`` 的 NaN（上游行情缺失时 pandas 的空值口径）会被 SQLite 存成
+        NULL 而触发 NOT NULL 约束冲突 → 整日采样失败；这里统一落成 0.0。
+        """
         with _write_lock:
             conn = self._connect()
             try:
@@ -124,7 +140,13 @@ class SentimentStore:
                 conn.executemany(
                     "INSERT INTO board_fund (date, rank, code, name, main_net) VALUES (?,?,?,?,?)",
                     [
-                        (int(date), i + 1, str(b["code"]), str(b["name"]), float(b["main_net"]))
+                        (
+                            int(date),
+                            i + 1,
+                            str(b["code"]),
+                            str(b["name"]),
+                            _real_or_zero(b["main_net"]),
+                        )
                         for i, b in enumerate(boards)
                     ],
                 )
@@ -155,7 +177,9 @@ class SentimentStore:
                         "rank": int(r["rank"]),
                         "code": str(r["code"]),
                         "name": str(r["name"]),
-                        "main_net": float(r["main_net"]),
+                        # 手工编辑/旧库可能存有 NULL（SQLite 把 NaN 存成 NULL），
+                        # float(None) 会 TypeError，兜成 0.0
+                        "main_net": float(r["main_net"] or 0.0),
                     }
                 )
             return list(grouped.values())

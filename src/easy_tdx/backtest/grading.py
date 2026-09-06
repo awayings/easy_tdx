@@ -131,6 +131,11 @@ THRESHOLDS: dict[str, tuple[str, tuple[Anchor, ...]]] = {
             Anchor(0.6, 0),
         ),
     ),
+    # 回撤持续：该维度输入的单位是「bar 数」（performance.max_dd_duration 输出
+    # 水下期的 bar 数），下方天数锚点按日线（1 bar ≈ 1 交易日）校准。分钟级
+    # 周期下 bar 数远大于天数，得分会系统性偏低（偏保守）。注意：评分维度
+    # （grade_performance / grade_portfolio_equity）当前均未使用该表项，
+    # 锚点仅供展示与前端对照。
     "max_dd_duration": (
         "回撤持续",
         (
@@ -400,7 +405,13 @@ def _downweight_unreliable(dimensions: list[DimensionScore]) -> bool:
 
 @dataclass
 class CombinedMetrics:
-    """从净值序列重算的组合级指标（净值可推导的字段子集）。"""
+    """从净值序列重算的组合级指标（净值可推导的字段子集）。
+
+    ``max_dd_duration`` 的单位是 **bar 数**（一根 K 线计 1），与
+    ``performance.max_dd_duration`` 同口径；THRESHOLDS 里对应锚点的天数
+    （30/90/365…）按日线（1 bar ≈ 1 交易日）校准，分钟级周期下该值按 bar
+    直读会显著大于天数（评级维度未使用，仅展示）。
+    """
 
     total_return: float = 0.0
     annual_return: float = 0.0
@@ -463,12 +474,24 @@ def compute_combined_metrics(equity: list[dict[str, Any]]) -> CombinedMetrics:
     # 最大回撤：优先用 drawdown_pct（与前端一致），缺则从 totals 反推。
     # 持续 = 最长水下期（峰值 → 重新创新高；末日未修复则计到最后一点），
     # 与 performance.py / combinedMetrics.ts / max_dd_duration 锚点量纲同口径。
+    # 缺行 / None / NaN 的 drawdown_pct 按「状态延续」处理：沿用上一根的
+    # 水下/峰值状态——此前缺行被当 0（创新高）截断水下期、NaN 永久脱离
+    # 峰值判定，两者都会扭曲 max_dd_duration。
     max_dd = 0.0
     max_dd_dur = 0
     if equity[0].get("drawdown_pct") is not None:
         last_peak = 0
+        prev_dd = 0.0  # 上一根的有效回撤（首根之前视作峰值状态）
         for i, e in enumerate(equity):
-            dd = float(e.get("drawdown_pct") or 0.0)
+            raw = e.get("drawdown_pct")
+            dd: float | None
+            try:
+                dd = None if raw is None else float(raw)
+            except (TypeError, ValueError):
+                dd = None
+            if dd is None or not math.isfinite(dd):
+                dd = prev_dd
+            prev_dd = dd
             if dd > max_dd:
                 max_dd = dd
             if dd == 0:

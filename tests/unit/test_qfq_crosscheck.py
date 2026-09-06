@@ -116,6 +116,13 @@ def test_detect_gap_uses_chinext_threshold() -> None:
     assert detect_ex_dividend_gaps(df2, "300750") == ["2010-01-06"]
 
 
+def test_detect_gap_ignores_nonfinite_ratio() -> None:
+    """前收缺失（NaN）导致的非有限比率不计为除权跳空（首根前收缺失常见）。"""
+    df = _kline([float("nan")] + [10.0] * 5, opens=[5.0] + [10.0] * 5)
+    # 旧实现把 ratio=NaN 也当跳空 → 误报 ["2010-01-02"]
+    assert detect_ex_dividend_gaps(df, "600000") == []
+
+
 # --------------------------------------------------------------------------- #
 # 已知案例回归（合成）
 # --------------------------------------------------------------------------- #

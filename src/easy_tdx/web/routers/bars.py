@@ -218,13 +218,24 @@ async def _fetch_120m(
 
 
 async def _baostock_last_resort(
-    market: str, code: str, category: str, start: int, count: int, adjust: str
+    market: str,
+    code: str,
+    category: str,
+    start: int,
+    count: int,
+    adjust: str,
+    is_index: bool = False,
 ) -> tuple[pd.DataFrame | None, str | None]:
     """TDX 全部路径失败/为空后的最后一级兜底：baostock（仅日线及以上）。
 
     未安装 baostock / 设置了 EASY_TDX_BAOSTOCK=0 / 周期不适用 / 查询失败
-    一律返回 ``(None, None)``——兜底源自身的任何失败都不影响原错误语义。
-    baostock 客户端阻塞且非线程安全：丢线程池执行，模块内部持锁串行。
+    一律返回 ``(None, None)``——兜底源自身的任何失败（含新版 fetch_bars 对
+    真故障抛出的 RuntimeError）都按"兜底不可用"处理，调用方继续维持原
+    TDX 错误语义。baostock 客户端阻塞且非线程安全：丢线程池执行，模块内部
+    持锁串行。
+
+    Args:
+        is_index: 标的是指数（/bars/index 兜底传 True，vol 股→手对齐契约）。
     """
     from easy_tdx.sources import baostock as baostock_source
 
@@ -232,14 +243,28 @@ async def _baostock_last_resort(
         return None, None
     try:
         df = await asyncio.to_thread(
-            baostock_source.fetch_bars, market, code, category, start, count, adjust
+            baostock_source.fetch_bars,
+            market,
+            code,
+            category,
+            start,
+            count,
+            adjust,
+            is_index,
         )
     except Exception as exc:  # noqa: BLE001 — 兜底失败不改变原错误路径
         _logger.warning("/bars baostock 兜底异常 (%s%s): %s", market, code, exc)
         return None, None
     if df is None or df.empty:
         return None, None
-    _logger.info("/bars 已启用 baostock 兜底 (%s%s %s，%d 根)", market, code, category, len(df))
+    _logger.info(
+        "/bars 已启用 baostock 兜底 (%s%s %s%s，%d 根)",
+        market,
+        code,
+        category,
+        "，指数" if is_index else "",
+        len(df),
+    )
     return df, "baostock"
 
 
@@ -339,7 +364,9 @@ async def security_bars(
             _logger.warning("/bars 标准 TdxClient 获取失败 (%s%s): %s", market, code, exc)
 
     if df is None or df.empty:
-        bdf, bsource = await _baostock_last_resort(market, code, category, start, count, adjust)
+        # 周期先归一成枚举名（"4"→DAY）：baostock 频率查表只认名称，
+        # 数字串直接透传会让兜底静默失效
+        bdf, bsource = await _baostock_last_resort(market, code, cat.name, start, count, adjust)
         if bdf is not None:
             df, source = bdf, bsource
 
@@ -391,7 +418,9 @@ async def index_bars(
         _logger.warning("/bars/index TdxClient 获取失败 (%s%s): %s", market, code, exc)
 
     if df is None or df.empty:
-        bdf, bsource = await _baostock_last_resort(market, code, category, start, count, "QFQ")
+        bdf, bsource = await _baostock_last_resort(
+            market, code, category_from_str(category).name, start, count, "QFQ", is_index=True
+        )
         if bdf is not None:
             df, source = bdf, bsource
 

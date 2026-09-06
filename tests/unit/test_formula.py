@@ -212,3 +212,81 @@ def test_compiled_formula_is_dataclass_safe():
     assert np.allclose(
         f.compute(_df(20)).columns["值"], f2.compute(_df(20)).columns["值"], equal_nan=True
     )
+
+
+# ── 回归：归类收严 / FILTER 副作用 / 递归上限 / REF 负移位（审查修复） ────────
+
+
+def test_ratio_output_classified_as_value_not_signal():
+    """0~1 区间的价格比率是数值列，不是信号列（旧码按 [0,1] 值域兜底误判）。"""
+    res = compile_formula("比率: C / HHV(C, 20);").compute(_df(40))
+    assert res.signals == []
+    assert res.values == ["比率"]
+
+
+def test_normalized_oscillator_classified_as_value():
+    """归一化振荡器（RSI/100）是数值列，不是信号列。"""
+    res = compile_formula("强度: RSI(C, 14) / 100;").compute(_df(40))
+    assert res.signals == []
+    assert res.values == ["强度"]
+
+
+def test_binary_zero_one_values_still_signal():
+    """真正的 0/1 两值输出仍兜底归信号列。"""
+    res = compile_formula("X: IF(C > MA(C, 5), 1, 0);").compute(_df(40))
+    assert res.signals == ["X"]
+
+
+def test_filter_does_not_pollute_series():
+    """FILTER(C, N) 不改写输入序列：同公式后续 MA(C, 2) 与未过滤一致。"""
+    df = _df(30)
+    res = compile_formula("A: FILTER(C, 2); B: MA(C, 2);").compute(df)
+    close = pd.to_numeric(df["close"]).to_numpy(dtype=float)
+    expected = pd.Series(close).rolling(2).mean().to_numpy()
+    np.testing.assert_allclose(res.columns["B"], expected, equal_nan=True)
+
+
+def test_deep_paren_nesting_formula_error():
+    """超深括号嵌套抛 FormulaError（嵌套过深），而非 RecursionError 逃逸。"""
+    text = "X: " + "(" * 5000 + "C" + ")" * 5000 + ";"
+    with pytest.raises(FormulaError, match="嵌套过深"):
+        compile_formula(text)
+
+
+def test_deep_unary_chain_formula_error():
+    """超长一元运算符链同样受深度上限保护。"""
+    with pytest.raises(FormulaError, match="嵌套过深"):
+        compile_formula("X: " + "!" * 5000 + "C;")
+
+
+def test_moderate_nesting_still_compiles():
+    """常规嵌套深度不受上限影响。"""
+    res = compile_formula("X: -(-(-(C + 1) * 2) + 3);").compute(_df(10))
+    assert res.columns["X"].shape == (10,)
+
+
+def test_ref_negative_shift_banned():
+    """REF 负移位（未来函数）显式 FormulaError，不再依赖 float 类型巧合。"""
+    with pytest.raises(FormulaError, match="负移位"):
+        compile_formula("X: REF(C, -1);").compute(_df(30))
+
+
+def test_ref_negative_via_expression_banned():
+    """负移位经表达式算出（如 0-1）同样被禁。"""
+    with pytest.raises(FormulaError, match="负移位"):
+        compile_formula("X: REF(C, 0 - 1);").compute(_df(30))
+
+
+def test_ref_positive_still_works():
+    res = compile_formula("X: REF(C, 1);").compute(_df(30))
+    assert np.isnan(res.columns["X"][0])
+    assert res.columns["X"][1] == pytest.approx(float(pd.to_numeric(_df(30)["close"]).iloc[0]))
+
+
+def test_mytt_internal_negative_ref_unaffected():
+    """MyTT 库内直调（ICHIMOKU 迟行带）不经公式白名单，负移位仍可用。"""
+    from easy_tdx.MyTT import REF
+
+    close = np.arange(5, dtype=float)
+    out = REF(close, -1)
+    assert out[0] == pytest.approx(1.0)

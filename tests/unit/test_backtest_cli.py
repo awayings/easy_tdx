@@ -141,3 +141,67 @@ class TestPortfolioCLIFlags:
         assert "--evaluate" in result.output
         assert "--wf" in result.output
         assert "--auto-fees" in result.output
+
+
+class TestIgnoredFlagWarnings:
+    """静默忽略的旗标组合必须显式告警（stderr），不得无提示吞掉。"""
+
+    def test_combo_with_wf_warns(self):
+        """--combo-strategies + --wf：旧码静默忽略，新码应告警并继续报策略文件错误。"""
+        from easy_tdx.backtest.cli import backtest
+
+        runner = CliRunner()
+        result = runner.invoke(
+            backtest,
+            [
+                "SZ",
+                "000001",
+                "--combo-strategies",
+                "nope_a.py,nope_b.py",
+                "--wf",
+            ],
+        )
+        assert "已忽略" in result.output
+        assert result.exit_code != 0  # 随后仍因策略文件不存在报错（无网络依赖）
+
+    def test_combo_with_evaluate_warns(self):
+        from easy_tdx.backtest.cli import backtest
+
+        runner = CliRunner()
+        result = runner.invoke(
+            backtest,
+            [
+                "SZ",
+                "000001",
+                "--combo-strategies",
+                "nope_a.py,nope_b.py",
+                "--evaluate",
+            ],
+        )
+        assert "已忽略" in result.output
+
+    def test_single_with_wf_no_warning(self):
+        """单策略 + --wf 是合法组合，不告警（在策略校验失败前无「已忽略」字样）。"""
+        from easy_tdx.backtest.cli import backtest
+
+        runner = CliRunner()
+        result = runner.invoke(backtest, ["SZ", "000001", "--wf"])
+        assert "已忽略" not in result.output
+
+    def test_optimize_all_with_param_warns(self):
+        """--all + --param：旧码静默忽略自定义网格，新码应告警。"""
+        from easy_tdx.backtest.cli import optimize
+
+        runner = CliRunner()
+        # 用非法市场名在联网取数前中断，仅验证告警已发出
+        result = runner.invoke(optimize, ["XX", "000001", "--all", "--param", "fast=5,10"])
+        assert "忽略" in result.output
+
+    def test_optimize_single_with_param_no_warning(self):
+        from easy_tdx.backtest.cli import optimize
+
+        runner = CliRunner()
+        result = runner.invoke(
+            optimize, ["XX", "000001", "--strategy", "ma_cross", "--param", "fast=5,10"]
+        )
+        assert "已忽略" not in result.output

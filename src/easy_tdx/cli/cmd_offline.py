@@ -561,6 +561,10 @@ def _sync_one_daily(client: TdxClient, filepath: Path) -> tuple[int, str]:
     # 协议返回的成交量单位是股；encode_daily_bar 在 vol_coeff=0.01 时按 ×100
     # 写入（.day 原始字段为股，读取端 ×0.01 还原为手），故写入前须换算为手。
     # 否则日成交 > 4295 万股（如招商银行等大盘股）的 bar 会溢出 uint32。
+    # 深市基金/ETF 同口径已实测锚定（2026-09-06）：sz159915.day 2026-06-12
+    # 原始 vol=1,249,608,655 与 get_security_bars 返回值完全一致，且
+    # amount/vol≈close——.day 原始字段与协议 vol 同为「股」，SZ_FUND
+    # （vol_coeff=0.01）走本分支换算正确，无需例外。
     if vol_coeff == 0.01:
         for b in bars:
             b.vol /= 100

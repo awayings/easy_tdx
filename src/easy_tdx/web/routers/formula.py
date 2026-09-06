@@ -131,7 +131,11 @@ async def run_formula_backtest_async(
         lambda: _run_formula_backtest(df, snapshot),
         description=f"公式回测 | {snapshot.symbol or '内联数据'}",
     )
-    return {"task_id": task_id, "status": "running"}
+    try:
+        status = runner.get(task_id).status
+    except KeyError:  # 极端：状态尚未可查时按提交默认态上报
+        status = "running"
+    return {"task_id": task_id, "status": status}
 
 
 @router.post("/formula/screen/run/async", status_code=202)
@@ -167,7 +171,11 @@ async def run_formula_screen_async(
         lambda: _run_formula_screen(bars, compiled, snapshot.signal_col),
         description=f"公式选股 | {len(bars)}只标的",
     )
-    return {"task_id": task_id, "status": "running"}
+    try:
+        status = runner.get(task_id).status
+    except KeyError:  # 极端：状态尚未可查时按提交默认态上报
+        status = "running"
+    return {"task_id": task_id, "status": status}
 
 
 # ── 内部实现 ───────────────────────────────────────────────────────────────────
@@ -187,12 +195,11 @@ async def _resolve_df(client: Any, req: FormulaComputeRequest) -> Any:
             df["datetime"] = pd.to_datetime(df["datetime"], errors="coerce")
         return df
     if req.symbol is not None:
-        from easy_tdx.web.convert import category_from_str, market_from_str
+        # 经 _fetch_bars_paged 按 800/页翻页取全量（协议单次上限 800，
+        # 单次调用 count>800 会被服务器静默截断，指标计算窗口悄悄变短）
+        from easy_tdx.web.routers.backtest import _fetch_bars_paged
 
-        market_str, code = req.symbol.split(":", 1)
-        df = await client.get_security_bars(
-            market_from_str(market_str), code, category_from_str(req.category), 0, req.count
-        )
+        df = await _fetch_bars_paged(client, req.symbol, req.category, req.count)
         if df is None or len(df) == 0:
             raise ValueError(f"标的 {req.symbol} 未取到 K 线数据")
         return df

@@ -57,10 +57,22 @@ jobs:
           mv dist/easy-tdx.exe "dist/easy-tdx-${VERSION}-windows.exe"
           ls -lh dist/
 
+      # 生成 SHA256 清单并随产物上传——Release 正文引导用户核对该哈希
+      # （防杀软误报时自行验证完整性），必须真实存在而非只写在文案里。
+      - name: Compute SHA256
+        shell: bash
+        run: |
+          cd dist
+          FILE=$(ls easy-tdx-*-windows.exe)
+          sha256sum "$FILE" > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
       - uses: actions/upload-artifact@v4
         with:
           name: easy-tdx-windows-exe
-          path: dist/easy-tdx-*-windows.exe
+          path: |
+            dist/easy-tdx-*-windows.exe
+            dist/SHA256SUMS.txt
           if-no-files-found: error
 
   release:
@@ -73,37 +85,64 @@ jobs:
           name: easy-tdx-windows-exe
           path: dist
 
+      # 重算哈希（与构建 job 的 SHA256SUMS.txt 同源同值），嵌入 Release 正文，
+      # 使「核对 Release 说明中公布的 SHA256」的指引真实可执行。
+      - name: Compute SHA256 for release notes
+        run: |
+          EXE=$(ls dist/easy-tdx-*-windows.exe)
+          SHA=$(sha256sum "$EXE" | cut -d' ' -f1)
+          echo "EXE_NAME=$(basename "$EXE")" >> "$GITHUB_ENV"
+          echo "EXE_SHA256=$SHA" >> "$GITHUB_ENV"
+
+      # 引号 heredoc 防止正文里的反引号被 bash 当命令替换，先写占位符再 sed 替换
+      - name: Generate release body
+        run: |
+          cat > release_body.md <<'BODY'
+          ## 下载使用
+
+          1. 下载下方 `__EXE_NAME__`（约 40-50MB）
+          2. 双击运行
+          3. 浏览器会自动打开回测界面（地址 `http://localhost:8000`）
+
+          ## ✅ 完整性核对（SHA256）
+
+          ```
+          __EXE_SHA256__  __EXE_NAME__
+          ```
+
+          PowerShell 核对：`Get-FileHash __EXE_NAME__`，与上方一致即为官方构建。
+          同份哈希也在附件 `SHA256SUMS.txt` 中。
+
+          ## ⚠️ SmartScreen 提示
+
+          本版本未做代码签名，首次运行 Windows 会弹出"已保护你的电脑"：
+
+          1. 点击 **更多信息**
+          2. 点击 **仍要运行**
+
+          Phase 2 将引入代码签名消除此提示。
+
+          ## 🛡️ 杀软误报说明（Windows Defender 报毒？请先读这里）
+
+          部分 Windows Defender 用户会看到 `Trojan:Win32/Wacatac.C!ml` 报警。
+          `.exe` 由 GitHub Actions 在公开的 tag 提交上从源码构建（本文件即构建脚本），
+          为**未签名的 PyInstaller 单文件**打包——"自解压 + 无签名"特征是杀软
+          机器学习引擎（`!ml` 后缀即 ML 判定）的经典误报源头，v1.32.1 起各版本
+          构建方式相同。自行核验：
+
+          1. 核对上方公布的 SHA256（PowerShell：`Get-FileHash __EXE_NAME__`）
+          2. 可上传 [VirusTotal](https://www.virustotal.com/) 交叉验证：典型误报特征是
+             少数 ML 启发式引擎报警、主流特征码引擎（Kaspersky/ESET/BitDefender 等）不报
+          3. 哈希一致仍想加速白名单，可向微软提交误报申诉：
+             [microsoft.com/en-us/wdsi/filesubmission](https://www.microsoft.com/en-us/wdsi/filesubmission)（选"软件开发者"）
+          BODY
+          sed -i "s/__EXE_NAME__/${EXE_NAME}/g; s/__EXE_SHA256__/${EXE_SHA256}/g" release_body.md
+
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/easy-tdx-*-windows.exe
+          files: |
+            dist/easy-tdx-*-windows.exe
+            dist/SHA256SUMS.txt
           generate_release_notes: true
-          body: |
-            ## 下载使用
-
-            1. 下载下方 `easy-tdx-*-windows.exe`（约 40-50MB）
-            2. 双击运行
-            3. 浏览器会自动打开回测界面（地址 `http://localhost:8000`）
-
-            ## ⚠️ SmartScreen 提示
-
-            本版本未做代码签名，首次运行 Windows 会弹出"已保护你的电脑"：
-
-            1. 点击 **更多信息**
-            2. 点击 **仍要运行**
-
-            Phase 2 将引入代码签名消除此提示。
-
-            ## 🛡️ 杀软误报说明（Windows Defender 报毒？请先读这里）
-
-            部分 Windows Defender 用户会看到 `Trojan:Win32/Wacatac.C!ml` 报警。
-            `.exe` 由 GitHub Actions 在公开的 tag 提交上从源码构建（本文件即构建脚本），
-            为**未签名的 PyInstaller 单文件**打包——"自解压 + 无签名"特征是杀软
-            机器学习引擎（`!ml` 后缀即 ML 判定）的经典误报源头，v1.32.1 起各版本
-            构建方式相同。自行核验：
-
-            1. 核对 Release 说明中公布的 SHA256（PowerShell：`Get-FileHash *.exe`）
-            2. 可上传 [VirusTotal](https://www.virustotal.com/) 交叉验证：典型误报特征是
-               少数 ML 启发式引擎报警、主流特征码引擎（Kaspersky/ESET/BitDefender 等）不报
-            3. 哈希一致仍想加速白名单，可向微软提交误报申诉：
-               [microsoft.com/en-us/wdsi/filesubmission](https://www.microsoft.com/en-us/wdsi/filesubmission)（选"软件开发者"）
+          body_path: release_body.md

@@ -21,11 +21,13 @@ from easy_tdx.web.schemas import (
 
 router = APIRouter(tags=["market"])
 
-# 涨停生态结果缓存（vipdoc 盘中随通达信客户端落盘更新，60s 足够新鲜）
-_limitup_cache: tuple[float, dict[str, Any]] | None = None
+# 涨停生态结果缓存（vipdoc 盘中随通达信客户端落盘更新，60s 足够新鲜）。
+# 键 = effective vipdoc（显式参数 > 已存设置 > None）：不同数据目录的扫描
+# 结果必须互不串台。
+_limitup_cache: dict[str | None, tuple[float, dict[str, Any]]] = {}
 _LIMITUP_TTL = 60.0
-# 涨停逐日历史缓存（历史数据不变，10 分钟；按 days 分键）
-_limitup_history_cache: dict[int, tuple[float, dict[str, Any]]] = {}
+# 涨停逐日历史缓存（历史数据不变，10 分钟；键 = (days, effective vipdoc)）
+_limitup_history_cache: dict[tuple[int, str | None], tuple[float, dict[str, Any]]] = {}
 
 
 def _df_response(df: Any) -> DataFrameResponse:
@@ -148,8 +150,8 @@ async def set_vipdoc_setting(req: dict[str, Any]) -> dict[str, Any]:
         get_app_settings_store().delete(_VIPDOC_KEY)
         resolved = None
     # 路径变更后旧扫描结果作废
-    global _limitup_cache, _limitup_history_cache
-    _limitup_cache = None
+    global _limitup_cache
+    _limitup_cache.clear()
     _limitup_history_cache.clear()
     return {"stored": path, "resolved": resolved}
 
@@ -165,12 +167,11 @@ async def limitup_ecology(
     涨停判定按代码段：主板 10%（含 5% 疑似 ST 标记）、创业板/科创板 20%；
     .day 文件无名称，name 由前端经批量报价补齐。
     """
-    global _limitup_cache
-    now = time.monotonic()
-    if _limitup_cache is not None and now - _limitup_cache[0] < _LIMITUP_TTL:
-        return DictResponse.from_dict(_limitup_cache[1])
-
     effective = _effective_vipdoc(vipdoc)
+    now = time.monotonic()
+    cached = _limitup_cache.get(effective)
+    if cached is not None and now - cached[0] < _LIMITUP_TTL:
+        return DictResponse.from_dict(cached[1])
 
     def _scan() -> dict[str, Any]:
         from easy_tdx.screen.limitup import compute_limitup_ecology
@@ -194,7 +195,7 @@ async def limitup_ecology(
         }
 
     payload = await asyncio.to_thread(_scan)
-    _limitup_cache = (now, payload)
+    _limitup_cache[effective] = (now, payload)
     return DictResponse.from_dict(payload)
 
 
@@ -244,20 +245,20 @@ async def limitup_history(
 
     全市场扫描约需数十秒，结果缓存 10 分钟。日期覆盖受 vipdoc 数据范围限制。
     """
-    global _limitup_history_cache
+    effective = _effective_vipdoc(vipdoc)
     now = time.monotonic()
-    cached = _limitup_history_cache.get(days)
+    cached = _limitup_history_cache.get((days, effective))
     if cached is not None and now - cached[0] < 600:
         return DictResponse.from_dict(cached[1])
 
     def _scan() -> dict[str, Any]:
         from easy_tdx.screen.limitup import compute_limitup_history
 
-        rows = compute_limitup_history(_effective_vipdoc(vipdoc), days=days)
+        rows = compute_limitup_history(effective, days=days)
         return {"count": len(rows), "days": rows}
 
     payload = await asyncio.to_thread(_scan)
-    _limitup_history_cache[days] = (now, payload)
+    _limitup_history_cache[(days, effective)] = (now, payload)
     return DictResponse.from_dict(payload)
 
 

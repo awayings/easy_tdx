@@ -12,7 +12,7 @@
  *           夏普/波动率按 √252 年化。如果是周线/月线，年化因子需要调整。
  */
 
-import type { EquityPoint } from '../types'
+import type { EquityPoint } from '../types.ts'
 
 /** 年化因子（按交易日）。 */
 const TRADING_DAYS_PER_YEAR = 252

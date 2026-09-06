@@ -18,6 +18,8 @@ const error = ref('')
 const loading = ref(false)
 
 let poll: number | null = null
+/** 请求序号守卫：await 后比对，过期响应（旧类型/旧窗口）直接丢弃。 */
+let loadSeq = 0
 
 function stopPoll() {
   if (poll !== null) {
@@ -27,9 +29,12 @@ function stopPoll() {
 }
 
 async function load() {
+  const my = ++loadSeq
   error.value = ''
   try {
     const r = await fetchHotspotCorrelation(props.boardType, props.days, props.perDay)
+    // 响应已过期：不覆盖新参数的 resp、不重启构建轮询
+    if (my !== loadSeq) return
     if (r.status === 'building') {
       resp.value = null
       loading.value = true
@@ -45,6 +50,7 @@ async function load() {
     resp.value = r
     render()
   } catch (e) {
+    if (my !== loadSeq) return
     stopPoll()
     loading.value = false
     error.value = formatError(e)

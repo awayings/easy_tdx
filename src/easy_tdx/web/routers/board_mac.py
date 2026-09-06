@@ -12,6 +12,7 @@ import pandas as pd
 from fastapi import APIRouter, Depends, Query
 
 from easy_tdx.mac.enums import Adjust, Period
+from easy_tdx.realtime.session import SHANGHAI_TZ, is_trading_time
 from easy_tdx.web.convert import (
     board_sort_from_str,
     board_type_from_str,
@@ -20,7 +21,7 @@ from easy_tdx.web.convert import (
     sort_type_from_str,
 )
 from easy_tdx.web.deps import get_mac_client
-from easy_tdx.web.schemas import DataFrameResponse, DictResponse
+from easy_tdx.web.schemas import DataFrameResponse, DictResponse, _json_safe
 
 _logger = logging.getLogger(__name__)
 
@@ -37,9 +38,9 @@ _OVERVIEW_METRIC_FIELDS: dict[str, str] = {
     "YTD": "chg_ytd",
 }
 _OVERVIEW_TTL = 15.0
-# (board_type, metrics) -> (monotonic 截止时间, payload)。无锁：并发重复拉取
-# 无害（AsyncMacClient 连接内本就串行），省去跨事件循环的锁生命周期问题。
-_overview_cache: dict[tuple[str, tuple[str, ...]], tuple[float, dict[str, Any]]] = {}
+# (board_type, metrics, count) -> (monotonic 截止时间, payload)。无锁：并发
+# 重复拉取无害（AsyncMacClient 连接内本就串行），省去跨事件循环的锁生命周期问题。
+_overview_cache: dict[tuple[str, tuple[str, ...], int], tuple[float, dict[str, Any]]] = {}
 
 # 可在单测中 monkeypatch 以控制 TTL 判定
 _now = time.monotonic
@@ -181,7 +182,7 @@ async def board_overview(
         valid = ", ".join(_OVERVIEW_METRIC_FIELDS)
         raise ValueError(f"无效指标 '{','.join(invalid)}'，可选值: {valid}")
 
-    cache_key = (bt.name, tuple(sort_names))
+    cache_key = (bt.name, tuple(sort_names), count)  # count 影响 payload 行数，必须入键
     cached = _overview_cache.get(cache_key)
     if cached is not None and _now() < cached[0]:
         return DictResponse.from_dict(cached[1])
@@ -231,7 +232,12 @@ async def board_overview(
                 row.setdefault(field, None)
             rows.append(row)
 
-    payload = {"board_type": bt.name, "ts": int(time.time()), "count": len(rows), "rows": rows}
+    # 坏值（NaN/inf，如无足够历史板块的 sort_value）在入缓存前清洗成 null：
+    # 带 NaN 的 payload 一旦入缓存，15s TTL 内每次命中都会在 JSON 序列化时
+    # 500（Starlette allow_nan=False）。
+    payload = _json_safe(
+        {"board_type": bt.name, "ts": int(time.time()), "count": len(rows), "rows": rows}
+    )
     _overview_cache[cache_key] = (_now() + _OVERVIEW_TTL, payload)
     return DictResponse.from_dict(payload)
 
@@ -263,8 +269,8 @@ _hotspot_builds: dict[str, dict[str, Any]] = {}
 
 
 def _today_str() -> str:
-    """当日日历日（缓存失效键；单测可 monkeypatch）。"""
-    return datetime.now().strftime("%Y-%m-%d")
+    """当日日历日（沪市时区，与主机时区无关；缓存失效键；单测可 monkeypatch）。"""
+    return datetime.now(SHANGHAI_TZ).strftime("%Y-%m-%d")
 
 
 async def _hotspot_build(board_key: str, bt: Any, client: Any) -> None:
@@ -499,8 +505,6 @@ async def board_hotspot(
         )
     )
     rows_out = rows_out[:_HOTSPOT_MAX_ROWS]
-
-    from easy_tdx.realtime.session import is_trading_time
 
     payload: dict[str, Any] = {
         "status": "ready",

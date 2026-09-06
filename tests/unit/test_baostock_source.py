@@ -46,16 +46,28 @@ def _fake_rows(n: int, end: str = "2026-09-04") -> list[list[str]]:
     return [[d, "10.0", "11.0", "9.5", "10.5", "100000", "1050000.0", "1"] for d in dates]
 
 
+def _weekly_rows(n: int, end: str = "2026-09-04") -> list[list[str]]:
+    """n 个周线行（无 tradestatus 列，与真实 W/M 返回一致）。"""
+    dates = pd.date_range(end=end, periods=n, freq="W-FRI").strftime("%Y-%m-%d")
+    return [[d, "10.0", "11.0", "9.5", "10.5", "500000", "5250000.0"] for d in dates]
+
+
 def _install_fake_bs(
     rows: list[list[str]] | None,
     captured: dict,
     *,
     query_error: bool = False,
+    login_error: bool = False,
 ) -> types.ModuleType:
     mod = types.ModuleType("baostock")
 
     def _login():  # type: ignore[no-untyped-def]
         captured["login"] = captured.get("login", 0) + 1
+        if login_error:
+            result = _FakeLoginResult()
+            result.error_code = "10001"
+            result.error_msg = "用户登录失败"
+            return result
         return _FakeLoginResult()
 
     mod.login = _login  # type: ignore[attr-defined]
@@ -166,12 +178,83 @@ def test_unsupported_inputs(fake_bs):
     assert "calls" not in fake_bs
 
 
-def test_query_error_returns_none(fake_bs):
-    """baostock 查询失败：返回 None 且不向上抛（兜底失败不改变原错误路径）。"""
+def test_query_error_raises_runtimeerror_and_logs(fake_bs, caplog):
+    """baostock 查询失败（error_code≠0）：记 warning 并抛 RuntimeError。
+
+    回归：旧实现吞掉所有异常静默返回 None——`--source baostock` 显式使用时
+    故障被伪装成"无数据"（sync 记 skipped 而非 failed）。auto 兜底路径
+    （web/routers/bars.py）以 except Exception 包裹调用，不受影响。
+    """
     _install_fake_bs([], fake_bs, query_error=True)
     from easy_tdx.sources import baostock as bs_source
 
-    assert bs_source.fetch_bars("SH", "600519", "DAY", 0, 5, "QFQ") is None
+    with pytest.raises(RuntimeError, match="baostock 拉取失败"):
+        bs_source.fetch_bars("SH", "600519", "DAY", 0, 5, "QFQ")
+    assert "baostock 拉取失败" in caplog.text
+
+
+def test_login_failure_raises_runtimeerror(fake_bs, monkeypatch: pytest.MonkeyPatch):
+    """baostock 登录失败：同样 warning + RuntimeError（不再静默）。"""
+    _install_fake_bs([], fake_bs, login_error=True)
+    from easy_tdx.sources import baostock as bs_source
+
+    with pytest.raises(RuntimeError, match="拉取失败"):
+        bs_source.fetch_bars("SZ", "000001", "DAY", 0, 5, "QFQ")
+
+
+def test_weekly_monthly_fields_exclude_tradestatus(fake_bs):
+    """W/M 请求不传 tradestatus（baostock 实测 error_code=10004012 报错），
+    日线保留。"""
+    from easy_tdx.sources import baostock as bs_source
+
+    weekly_rows = _weekly_rows(6)
+    _install_fake_bs(weekly_rows, fake_bs)
+    df = bs_source.fetch_bars("SH", "600519", "WEEK", 0, 5, "QFQ")
+    assert df is not None and len(df) == 5
+    assert fake_bs["frequency"] == "w"
+    assert "tradestatus" not in fake_bs["fields"]
+    assert list(df.columns) == ["date", "open", "close", "high", "low", "vol", "amount"]
+
+    _install_fake_bs(_weekly_rows(6), fake_bs)
+    df = bs_source.fetch_bars("SH", "600519", "MONTH", 0, 5, "QFQ")
+    assert df is not None and len(df) == 5
+    assert fake_bs["frequency"] == "m"
+    assert "tradestatus" not in fake_bs["fields"]
+
+    # 日线仍保留 tradestatus（停牌剔除依赖它）
+    _install_fake_bs(_fake_rows(6), fake_bs)
+    bs_source.fetch_bars("SH", "600519", "DAY", 0, 5, "QFQ")
+    assert "tradestatus" in fake_bs["fields"]
+
+
+def test_weekly_suspension_dropped_by_volume(fake_bs):
+    """WEEK 无 tradestatus 列时，停牌/无成交周（volume=0）按 vol>0 兜底剔除。"""
+    from easy_tdx.sources import baostock as bs_source
+
+    rows = _weekly_rows(6)
+    rows[2][5] = "0"  # volume=0 的停牌周
+    _install_fake_bs(rows, fake_bs)
+    df = bs_source.fetch_bars("SZ", "000001", "WEEK", 0, 10, "QFQ")
+    assert df is not None and len(df) == 5
+    assert (df["vol"] > 0).all()
+
+
+def test_index_volume_converted_to_lots(fake_bs):
+    """is_index=True：指数 vol 股→手（÷100），对齐 /bars/index 契约。
+
+    实测 sh.000001 2026-09-04：baostock volume=53,728,616,100（股），
+    ÷100 = 537,286,161 手（TDX 指数日线口径为手）。
+    """
+    from easy_tdx.sources import baostock as bs_source
+
+    df = bs_source.fetch_bars("SH", "000001", "DAY", 0, 5, "NONE", is_index=True)
+    assert df is not None
+    assert (df["vol"] == 1000.0).all()  # 100000 股 ÷100 = 1000 手
+
+    # 默认（个股路径）不换算
+    _install_fake_bs(_fake_rows(6), fake_bs)
+    df = bs_source.fetch_bars("SH", "600519", "DAY", 0, 5, "QFQ")
+    assert (df["vol"] == 100000).all()
 
 
 # ---------------------------------------------------------------------------

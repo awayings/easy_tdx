@@ -197,6 +197,31 @@ def test_evaluate_strategy_auto_fees_for_etf():
     assert report["config"]["auto_fees"] is True
 
 
+def test_evaluate_portfolio_auto_fees_fitness_per_stock_symbol():
+    """组合体检逐段应按各标的品种解析费率（auto_fees 与主回测同口径）。
+
+    回归：evaluate_portfolio 的 per-stock FitnessEngine 漏传 symbol，
+    auto_fees 不生效——ETF 组合的三段体检被按股票口径错收印花税（卖方 0.001），
+    与组合回测主路径（PortfolioBacktestEngine 逐标的 resolve_fee_model）不一致。
+    期望：报告里的三段体检与「正确传入 symbol 的独立体检」逐段一致。
+    """
+    from easy_tdx.backtest.benchmark import evaluate_portfolio
+    from easy_tdx.backtest.portfolio_engine import StockData
+
+    df = _df(240, drift=0.002)
+    stocks = [StockData("159915", "SZ", df)]  # ETF：法定免印花税
+    report = evaluate_portfolio(
+        _CycleTrader, stocks, total_cash=100_000, auto_fees=True, n_windows=3
+    )
+
+    expected = FitnessEngine(symbol="SZ159915", strategy=_CycleTrader, auto_fees=True).evaluate(df)
+    actual_returns = [seg["total_return"] for seg in report["fitness"]["segments"]]
+    expected_returns = [seg.total_return for seg in expected.segments]
+    assert len(actual_returns) == 3
+    for actual, exp in zip(actual_returns, expected_returns):
+        assert actual == pytest.approx(exp, abs=1e-9)
+
+
 # ── evaluate_portfolio（v1.31 组合级一条龙）───────────────────────────────────
 def _stocks_for_portfolio() -> list[Any]:
     from easy_tdx.backtest.portfolio_engine import StockData

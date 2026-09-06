@@ -379,3 +379,39 @@ def test_hotspot_correlation_building_passthrough():
     assert body["status"] in ("building", "error", "ready")  # 单机假客户端极快时可能已完成
     if body["status"] == "building":
         assert 0.0 <= body["progress"] <= 1.0
+
+
+# ── 时区统一（v1.32.6）：日历日一律取沪市时区，与主机时区无关 ────────────────
+
+
+# 模块导入时捕获真实实现（autouse fixture 会把 _today_str 换成钉死的 lambda）
+_board_mac_mod = pytest.importorskip("easy_tdx.web.routers.board_mac")
+_REAL_TODAY_STR = _board_mac_mod._today_str
+
+
+def test_today_str_uses_shanghai_tz(monkeypatch):
+    """_today_str 必须用 SHANGHAI_TZ 取"今天"（旧实现用主机本地时区）。
+
+    海外机器（如 UTC-5）上北京时间 09-06 02:00 时本地还是 09-05，
+    旧实现会把热点矩阵的"今日"判定错一天。
+    """
+    from datetime import datetime
+
+    pytest.importorskip("fastapi")
+    from easy_tdx.realtime.session import SHANGHAI_TZ
+    from easy_tdx.web.routers import board_mac
+
+    # 恢复被 autouse fixture 钉住的真实现
+    monkeypatch.setattr(board_mac, "_today_str", _REAL_TODAY_STR)
+
+    captured: dict = {}
+
+    class _FakeDatetime:
+        @classmethod
+        def now(cls, tz=None):
+            captured["tz"] = tz
+            return datetime(2026, 9, 6, 2, 0, tzinfo=tz) if tz else datetime(2026, 9, 6, 2, 0)
+
+    monkeypatch.setattr(board_mac, "datetime", _FakeDatetime)
+    assert board_mac._today_str() == "2026-09-06"
+    assert captured["tz"] is SHANGHAI_TZ

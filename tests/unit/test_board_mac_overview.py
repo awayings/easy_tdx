@@ -219,3 +219,75 @@ def test_overview_zero_pre_close_change_pct_null():
     row = resp.json()["data"]["rows"][0]
     assert row["change_pct"] is None
     assert row["leader_change_pct"] is None
+
+
+def test_overview_cache_key_includes_count():
+    """缓存键须含 count：不同 count 的请求在 TTL 内不互相命中。
+
+    旧实现缓存键只有 (board_type, metrics)，先到的小 count 请求会把大 count
+    的响应"污染"成少数行（15s TTL 内）。
+    """
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+
+    frames = {
+        "CHANGE_PCT": _board_df(
+            [
+                _board_row("881001", "软件服务", 5000.0, 4900.0),
+                _board_row("881002", "半导体", 3000.0, 2950.0),
+            ]
+        ),
+    }
+
+    class _CountingFake(_FakeOverviewMacClient):
+        """尊重 count 参数（与真实客户端一致地截断行数）。"""
+
+        async def get_board_list(self, board_type=None, count=10000, sort_column=None):
+            df = await super().get_board_list(
+                board_type=board_type, count=count, sort_column=sort_column
+            )
+            return df.head(count) if df is not None else df
+
+    fake = _CountingFake(frames)
+    with TestClient(_overview_app(fake)) as client:
+        r_small = client.get("/api/v1/board-mac/overview", params={"board_type": "HY", "count": 1})
+        assert r_small.status_code == 200
+        assert r_small.json()["data"]["count"] == 1
+
+        r_big = client.get("/api/v1/board-mac/overview", params={"board_type": "HY", "count": 2})
+        assert r_big.status_code == 200
+        # 不允许命中 count=1 的缓存
+        assert r_big.json()["data"]["count"] == 2
+    assert fake.calls.count("CHANGE_PCT") == 2  # 两个 count 各拉一次
+
+
+def test_overview_nan_payload_cleaned_before_cache():
+    """坏值（NaN）行不产生 500，且写入缓存前已清洗（缓存里不留 NaN）。
+
+    旧实现：sort_value=NaN → payload 带 NaN → Starlette allow_nan=False
+    序列化 500，且带毒 payload 先入 15s 缓存，TTL 内持续 500。
+    """
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+
+    from easy_tdx.web.routers import board_mac
+
+    nan = float("nan")
+    frames = {
+        "CHANGE_PCT": _board_df([_board_row("881001", "软件服务", 5000.0, 4900.0)]),
+        "SPEED": _board_df([_board_row("881001", "软件服务", 5000.0, 4900.0, sort_value=nan)]),
+    }
+    fake = _FakeOverviewMacClient(frames)
+    with TestClient(_overview_app(fake)) as client:
+        r1 = _get_overview(client)
+        assert r1.status_code == 200
+        assert r1.json()["data"]["rows"][0]["speed"] is None
+
+        # 坏 payload 不得入缓存：缓存里的 speed 应已是 None
+        cached = board_mac._overview_cache[("HY", ("SPEED", "CHANGE_20D"), 2000)][1]
+        assert cached["rows"][0]["speed"] is None
+
+        r2 = _get_overview(client)  # 命中缓存也不再 500
+        assert r2.status_code == 200
+        assert r2.json()["data"]["rows"][0]["speed"] is None
+    assert fake.calls.count("SPEED") == 1

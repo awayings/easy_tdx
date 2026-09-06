@@ -30,6 +30,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -37,8 +38,14 @@ import numpy as np
 import pandas as pd
 
 from easy_tdx.backtest.engine import BacktestEngine
+from easy_tdx.backtest.performance import PerformanceAnalyzer
 from easy_tdx.backtest.strategy import Strategy
 from easy_tdx.backtest.types import to_json_native
+
+logger = logging.getLogger(__name__)
+
+# 单个测试窗最少 bar 数（低于此的窗口跳过，不参与评估）
+MIN_WINDOW_BARS = 20
 
 __all__ = [
     "WalkForwardWindow",
@@ -198,7 +205,7 @@ class WalkForwardEngine:
         for i in range(self._n_windows):
             s = eval_start + i * window_len
             e = s + window_len if i < self._n_windows - 1 else n  # 末窗吃到尾部
-            if e - s < 5:
+            if e - s < MIN_WINDOW_BARS:
                 continue
             win = self._run_window(df, s, e, i)
             if win is not None:
@@ -211,7 +218,9 @@ class WalkForwardEngine:
         """独立回测单个窗口 [s, e)。
 
         带前置上下文（指标预热），用 warmup_bars 压制上下文区间的信号；
-        窗口起点空仓（每窗独立开仓语义）。
+        窗口起点空仓（每窗独立开仓语义）。绩效只用窗内净值与成交计算，
+        上下文预热区不稀释 sharpe/年化/波动等时间口径指标（与组合级
+        ``_ComboWalkForwardBase._run_window`` 的 ``ec.iloc[lead:]`` 同口径）。
         """
         ctx_s = max(0, s - self._context_bars)
         lead = s - ctx_s  # 上下文 bar 数 = 需压制的信号数
@@ -226,9 +235,10 @@ class WalkForwardEngine:
         )
         try:
             bt = engine.run(sub)
-        except Exception:  # noqa: BLE001 — 单窗失败不拖垮整组，跳过该窗
+        except Exception as exc:  # noqa: BLE001 — 单窗失败不拖垮整组，跳过该窗
+            logger.warning("WF 第 %s 窗回测失败，跳过该窗：%s: %s", index, type(exc).__name__, exc)
             return None
-        perf = bt.performance
+        perf = self._window_performance(bt, lead)
 
         dt = self._dates(sub, lead)
         return WalkForwardWindow(
@@ -241,20 +251,47 @@ class WalkForwardEngine:
             max_drawdown=float(perf.get("max_drawdown", 0.0)),
             total_trades=int(perf.get("total_trades", 0)),
             win_rate=float(perf.get("win_rate", 0.0)),
-            performance={k: v for k, v in perf.items()},
+            performance=perf,
         )
 
     @staticmethod
+    def _window_performance(bt: Any, lead: int) -> dict[str, Any]:
+        """只用窗内净值 + 成交重算绩效（上下文预热区不参与窗指标）。
+
+        上下文区净值恒为初始现金（warmup 压制信号），窗口内回撤/收益不变，
+        但 sharpe/年化/波动等按全序列（含上下文）计算会被零收益段稀释。
+        """
+        equity = bt.equity_curve
+        if len(equity) <= lead:
+            return dict(bt.performance)
+        window_equity = equity.iloc[lead:].reset_index(drop=True)
+        return dict(PerformanceAnalyzer(equity_curve=window_equity, trades=bt.trades).compute())
+
+    @staticmethod
     def _dates(sub: pd.DataFrame, lead: int) -> tuple[str, str]:
-        """取窗口起止日期（跳过 lead 根上下文）。"""
+        """取窗口起止日期（跳过 lead 根上下文）。
+
+        int/np 整数（YYYYMMDD，TDX 日线原样）先 str 再按 %Y%m%d 解析——
+        直接 ``pd.Timestamp(int)`` 会被当纳秒换算成 1970 年。
+        """
         col = "datetime" if "datetime" in sub.columns else "date"
         vals = sub[col].iloc[lead:]
         if len(vals) == 0:
             return "", ""
         return (
-            pd.Timestamp(vals.iloc[0]).strftime("%Y-%m-%d"),
-            pd.Timestamp(vals.iloc[-1]).strftime("%Y-%m-%d"),
+            WalkForwardEngine._fmt_date(vals.iloc[0]),
+            WalkForwardEngine._fmt_date(vals.iloc[-1]),
         )
+
+    @staticmethod
+    def _fmt_date(v: Any) -> str:
+        """单个日期值 → YYYY-MM-DD（int/float YYYYMMDD 与 Timestamp/datetime64 兼容）。"""
+        ts: str
+        if isinstance(v, int | float | np.integer | np.floating) and not isinstance(v, bool):
+            ts = str(pd.to_datetime(str(int(v)), format="%Y%m%d").strftime("%Y-%m-%d"))
+        else:
+            ts = str(pd.Timestamp(v).strftime("%Y-%m-%d"))
+        return ts
 
     @staticmethod
     def _aggregate(result: WalkForwardResult) -> None:
@@ -270,7 +307,8 @@ class WalkForwardEngine:
         result.worst_window = float(np.min(rets))
         result.best_window = float(np.max(rets))
         result.mean_sharpe = float(np.mean([w.sharpe for w in ws]))
-        result.worst_drawdown = float(min(w.max_drawdown for w in ws))
+        # max_drawdown 为正数幅度（(peak-total)/peak），“最差窗回撤”应取最大值
+        result.worst_drawdown = float(max(w.max_drawdown for w in ws))
         result.total_trades = int(sum(w.total_trades for w in ws))
 
 
@@ -352,7 +390,7 @@ class _ComboWalkForwardBase:
         for i in range(self._n_windows):
             s = eval_start + i * window_len
             e = s + window_len if i < self._n_windows - 1 else n  # 末窗吃到尾部
-            if e - s < 5:
+            if e - s < MIN_WINDOW_BARS:
                 continue
             win = self._run_window(timeline, s, e, i)
             if win is not None:
@@ -413,7 +451,14 @@ class _ComboWalkForwardBase:
             )
             try:
                 bt = engine.run(sub)
-            except Exception:  # noqa: BLE001 — 单槽位失败不拖垮整窗
+            except Exception as exc:  # noqa: BLE001 — 单槽位失败不拖垮整窗
+                logger.warning(
+                    "WF 组合第 %s 窗槽位 %s 回测失败，跳过：%s: %s",
+                    index,
+                    slot.key,
+                    type(exc).__name__,
+                    exc,
+                )
                 continue
 
             # 只取窗内净值点（上下文区恒为现金，不参与窗指标，避免稀释波动率）
@@ -453,7 +498,6 @@ class _ComboWalkForwardBase:
             if trade_frames
             else pd.DataFrame(columns=["symbol", "direction", "pnl", "rejected"])
         )
-        from easy_tdx.backtest.performance import PerformanceAnalyzer
 
         perf = PerformanceAnalyzer(equity_curve=window_equity, trades=all_trades).compute()
 

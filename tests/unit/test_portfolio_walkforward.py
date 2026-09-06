@@ -182,3 +182,30 @@ def test_multi_strategy_wf_empty_slots() -> None:
 
     wf = MultiStrategyWalkForwardEngine(strategies=[], n_windows=3).run()
     assert wf.windows == []
+
+
+def test_combo_slot_failure_logs_warning(caplog):
+    """单槽位回测异常记 warning（含槽位标识），不拖垮整窗（旧码静默 continue）。"""
+    import logging
+
+    from easy_tdx.backtest.multi_strategy_engine import StrategySlot
+    from easy_tdx.backtest.walkforward import MultiStrategyWalkForwardEngine
+
+    class Boom(Strategy):
+        def init(self) -> None:
+            raise RuntimeError("slot-boom")
+
+        def next(self) -> None:
+            pass
+
+    slots = [
+        StrategySlot(
+            label="正常", symbol="SH:601088", strategy=PeriodicStrategy(), df=_make_df(400, seed=42)
+        ),
+        StrategySlot(label="炸裂", symbol="SZ:000001", strategy=Boom(), df=_make_df(400, seed=99)),
+    ]
+    with caplog.at_level(logging.WARNING, logger="easy_tdx.backtest.walkforward"):
+        wf = MultiStrategyWalkForwardEngine(strategies=slots, n_windows=3).run()
+    assert len(wf.windows) == 3  # 正常槽位照常出窗
+    assert wf.total_trades > 0
+    assert any("炸裂" in r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING)

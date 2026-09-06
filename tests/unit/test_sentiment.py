@@ -7,6 +7,7 @@ sentiment_store 用 EASY_TDX_CONFIG_DIR 指向临时目录；limitup 历史复�
 from __future__ import annotations
 
 import asyncio
+import pathlib
 
 import pytest
 
@@ -110,7 +111,11 @@ def test_sampler_inserts_store_rows(store):
 
 @pytest.fixture
 def vipdoc_factory(tmp_path):
-    """按 {文件名: {dates, closes}} 合成 vipdoc 目录的工厂。"""
+    """按 {文件名: {dates, closes}} 合成 vipdoc 目录的工厂。
+
+    ``factory(specs, root=None)``：root 缺省写 tmp_path；同一测试需要多个
+    独立 vipdoc 目录时传不同 root。
+    """
     from easy_tdx.offline.daily_bar import _DAILY_FMT
 
     def _day(date: int, close: float) -> bytes:
@@ -125,14 +130,15 @@ def vipdoc_factory(tmp_path):
             0,
         )
 
-    def factory(specs: dict[str, dict]) -> object:
+    def factory(specs: dict[str, dict], root=None) -> object:
+        base = pathlib.Path(root) if root is not None else tmp_path
         for filename, spec in specs.items():
             exchange = filename[:2]
-            lday = tmp_path / exchange / "lday"
+            lday = base / exchange / "lday"
             lday.mkdir(parents=True, exist_ok=True)
             data = b"".join(_day(d, c) for d, c in zip(spec["dates"], spec["closes"]))
             (lday / f"{filename}.day").write_bytes(data)
-        return tmp_path
+        return base
 
     return factory
 
@@ -198,3 +204,173 @@ def test_limitup_history_endpoint_cache(vipdoc_factory, monkeypatch):
         assert body["days"][0] == {"date": 20260802, "limit_up": 1, "limit_down": 0}
         client.get("/api/v1/market/limitup-history", params={"days": 10, "vipdoc": str(v)})
     assert calls["n"] == 1  # 缓存命中
+
+
+def test_board_fund_history_null_main_net_no_type_error(tmp_path):
+    """历史遗留的 main_net NULL 行不得让 /market/board-fund/history 抛 TypeError。
+
+    正式 schema 的 main_net 是 REAL NOT NULL（NaN 会被 SQLite 存成 NULL 而
+    被 NOT NULL 拒绝），但手工编辑/旧版本库可能存在 NULL 行——读侧须兜底。
+    旧实现：float(None) 抛 TypeError。
+    """
+    import sqlite3
+
+    db = tmp_path / "legacy_sentiment.db"
+    conn = sqlite3.connect(db)
+    conn.executescript(
+        """
+        CREATE TABLE samples (date INTEGER NOT NULL, minute INTEGER NOT NULL, ts INTEGER NOT NULL,
+            up_count INTEGER NOT NULL, down_count INTEGER NOT NULL, neutral_count INTEGER NOT NULL,
+            total_count INTEGER NOT NULL, limit_up_count INTEGER NOT NULL,
+            limit_down_count INTEGER NOT NULL, total_amount REAL NOT NULL,
+            PRIMARY KEY (date, minute));
+        CREATE TABLE board_fund (date INTEGER NOT NULL, rank INTEGER NOT NULL,
+            code TEXT NOT NULL, name TEXT NOT NULL, main_net REAL,
+            PRIMARY KEY (date, rank));
+        """
+    )
+    conn.execute(
+        "INSERT INTO board_fund (date, rank, code, name, main_net) VALUES (?,?,?,?,?)",
+        (20260901, 1, "881001", "银行", None),
+    )
+    conn.commit()
+    conn.close()
+
+    from easy_tdx.web.sentiment_store import SentimentStore
+
+    store = SentimentStore(db_path=db)
+    assert store.list_fund_days(5) == [
+        {
+            "date": 20260901,
+            "boards": [{"rank": 1, "code": "881001", "name": "银行", "main_net": 0.0}],
+        }
+    ]
+
+
+def test_upsert_fund_day_nan_main_net_stored_as_zero(store):
+    """写入口径：NaN 主力净流入落库为 0.0（REAL NOT NULL 列不吃 NaN）。"""
+    store.upsert_fund_day(
+        20260902,
+        [{"code": "881001", "name": "银行", "main_net": float("nan")}],
+    )
+    days = store.list_fund_days(5)
+    assert days[0]["boards"][0]["main_net"] == 0.0
+
+
+def test_limitup_history_cache_key_includes_vipdoc(vipdoc_factory, monkeypatch, tmp_path):
+    """limitup-history 缓存键须含 (days, vipdoc)，不同 vipdoc 不互相命中。"""
+    pytest.importorskip("fastapi")
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from easy_tdx.screen import limitup as limitup_mod
+    from easy_tdx.web.errors import register_exception_handlers
+    from easy_tdx.web.routers import market as market_mod
+
+    v1 = vipdoc_factory({"sh600100": {"dates": [20260801, 20260802], "closes": [10.0, 11.0]}})
+    v2_dir = tmp_path / "vipdoc_v2"
+    (v2_dir / "sh" / "lday").mkdir(parents=True)
+    v2 = vipdoc_factory(
+        {
+            "sh600100": {"dates": [20260801, 20260802], "closes": [10.0, 11.0]},
+            "sz000200": {"dates": [20260801, 20260802], "closes": [10.0, 9.0]},
+        },
+        root=v2_dir,
+    )
+    calls = {"n": 0}
+    real = limitup_mod.compute_limitup_history
+
+    def counting(*a, **kw):
+        calls["n"] += 1
+        return real(*a, **kw)
+
+    monkeypatch.setattr(limitup_mod, "compute_limitup_history", counting)
+
+    app = FastAPI()
+    register_exception_handlers(app)
+    app.include_router(market_mod.router, prefix="/api/v1")
+    app.state.tdx_client = object()
+
+    with TestClient(app) as client:
+        r1 = client.get("/api/v1/market/limitup-history", params={"days": 10, "vipdoc": str(v1)})
+        assert r1.status_code == 200
+        r2 = client.get("/api/v1/market/limitup-history", params={"days": 10, "vipdoc": str(v2)})
+        assert r2.status_code == 200
+        # v2 多一只跌停股 → 结果必须不同（不允许命中 v1 的缓存）
+        assert r2.json()["data"]["days"][0]["limit_down"] == 1
+    assert calls["n"] == 2
+
+
+# ── 采样器时区统一（v1.32.6）：日期/分钟键一律取沪市时区 ─────────────────────
+
+
+class _RecorderDatetime:
+    """记录 now(tz) 实参的 datetime 替身。"""
+
+    captured: dict = {}
+
+    @classmethod
+    def now(cls, tz=None):
+        cls.captured["tz"] = tz
+        from datetime import datetime as _dt
+
+        return _dt(2026, 9, 6, 2, 30, tzinfo=tz) if tz else _dt(2026, 9, 6, 2, 30)
+
+
+def test_sentiment_sampler_uses_shanghai_tz(store, monkeypatch):
+    """SentimentSampler._sample_once 的 (date, minute) 键必须取沪市时区。"""
+    import asyncio
+
+    import pandas as pd
+
+    from easy_tdx.realtime.session import SHANGHAI_TZ
+    from easy_tdx.web import sentiment_sampler as ss_mod
+
+    async def fake_stat():
+        return pd.DataFrame(
+            [
+                {
+                    "up_count": 2000,
+                    "down_count": 2000,
+                    "neutral_count": 100,
+                    "total_count": 4100,
+                    "limit_up_count": 50,
+                    "limit_down_count": 10,
+                    "total_amount": 8e11,
+                }
+            ]
+        )
+
+    monkeypatch.setattr(ss_mod, "datetime", _RecorderDatetime)
+    sampler = ss_mod.SentimentSampler(fake_stat, store=store)
+    asyncio.run(sampler._sample_once())
+
+    assert _RecorderDatetime.captured["tz"] is SHANGHAI_TZ
+    rows = store.day_samples(20260906)
+    assert len(rows) == 1 and rows[0]["minute"] == 230
+
+
+def test_fund_flow_sampler_uses_shanghai_tz(store, monkeypatch):
+    """FundFlowSampler._sample_once 的采样日期必须取沪市时区。"""
+    import asyncio
+
+    import pandas as pd
+
+    from easy_tdx.realtime.session import SHANGHAI_TZ
+    from easy_tdx.web import sentiment_sampler as ss_mod
+
+    class _FakeMac:
+        async def get_board_ranking(self, **kw):
+            return pd.DataFrame(
+                [
+                    {"code": "881001", "name": "银行", "main_net_amount": 1.2e9},
+                ]
+            )
+
+    monkeypatch.setattr(ss_mod, "datetime", _RecorderDatetime)
+    sampler = ss_mod.FundFlowSampler(_FakeMac(), store=store)
+    asyncio.run(sampler._sample_once())
+
+    assert _RecorderDatetime.captured["tz"] is SHANGHAI_TZ
+    days = store.list_fund_days(5)
+    assert days[0]["date"] == 20260906

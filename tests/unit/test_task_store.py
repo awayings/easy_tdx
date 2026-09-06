@@ -257,3 +257,78 @@ def test_task_list_includes_persisted_history_after_new_app(persisted_env):
     client = _client()
     tasks = client.get("/api/v1/backtest/tasks?limit=50").json()["tasks"]
     assert any(t["task_id"] == task_id for t in tasks)
+
+
+# ── v1.32.6 修复：列表查询懒加载 result_json + 淘汰只移终态 ────────────────────
+
+
+def test_list_recent_without_results_skips_result_json(persisted_env):
+    """include_results=False 时不 SELECT/解析 result_json（列表页瘦身）。
+
+    旧签名无该参数：列表页会把每条任务的完整结果 JSON 拖进内存解析。
+    """
+    import sqlite3
+
+    from easy_tdx.web.task_store import TaskStore
+
+    store = TaskStore()
+    store.save(
+        task_id="big",
+        status="done",
+        created_at=2.0,
+        result={
+            "performance": {"total_return": 0.25},
+            "equity_curve": [{"i": i} for i in range(500)],
+        },
+    )
+    # 把 result_json 打坏：include_results=False 路径根本不读它 → 不受影响
+    with sqlite3.connect(store.path) as conn:
+        conn.execute("UPDATE backtest_tasks SET result_json = '{not-json' WHERE task_id='big'")
+        conn.commit()
+
+    rows = store.list_recent(limit=10, include_results=False)
+    assert len(rows) == 1
+    assert rows[0]["task_id"] == "big"
+    assert rows[0]["status"] == "done"
+    assert rows[0]["result"] is None
+
+    # 详情（load）仍取全量并走损坏降级路径
+    d = store.load("big")
+    assert d is not None and d["result"] is None
+
+
+def test_eviction_only_removes_terminal_states():
+    """超限淘汰只移 done/failed；pending/running 不淘汰（消灭 pending 幽灵）。
+
+    旧实现"淘汰最旧 non-running"会把最早提交、尚未起跑的 pending 条目淘汰，
+    其 worker 随后取不到状态直接跳过 → 磁盘遗留 pending 行被恢复成永久
+    pending 的幽灵任务。
+    """
+    from easy_tdx.web.task_runner import BacktestTaskRunner, TaskState
+
+    runner = BacktestTaskRunner(max_workers=1, max_results=2)
+    with runner._lock:
+        # 插入顺序即 LRU 序：pending 最旧、done 最新
+        runner._tasks["p1"] = TaskState(task_id="p1", status="pending")
+        runner._tasks["r1"] = TaskState(task_id="r1", status="running")
+        runner._tasks["d1"] = TaskState(task_id="d1", status="done")
+        runner._evict_if_needed_locked()
+
+    assert "p1" in runner._tasks, "pending 不得被淘汰"
+    assert "r1" in runner._tasks, "running 不得被淘汰"
+    assert "d1" not in runner._tasks, "超限时应淘汰最旧的终态条目"
+
+
+def test_eviction_pending_still_evicted_by_old_logic_regression_guard():
+    """回归对照：若恢复旧逻辑（淘汰首个 non-running），pending 会先被选中。
+
+    本测试钉死新语义——全部条目为 pending 时宁可不淘汰（超限跳过）。
+    """
+    from easy_tdx.web.task_runner import BacktestTaskRunner, TaskState
+
+    runner = BacktestTaskRunner(max_workers=1, max_results=1)
+    with runner._lock:
+        runner._tasks["p1"] = TaskState(task_id="p1", status="pending")
+        runner._tasks["p2"] = TaskState(task_id="p2", status="pending")
+        runner._evict_if_needed_locked()
+    assert len(runner._tasks) == 2  # 无终态可淘汰 → 跳过，不丢任务

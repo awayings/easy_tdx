@@ -12,10 +12,10 @@
  * @see docs/superpowers/plans 评级系统设计文档
  */
 
-import type { BacktestResult, EquityPoint, GridPointResult, Performance, PortfolioResult } from '../types'
-import { buildResult, scoreDimension } from './engine'
-import { computeCombinedMetrics } from './combinedMetrics'
-import type { DimensionScore, GradeResult, VetoHit } from './types'
+import type { BacktestResult, EquityPoint, GridPointResult, Performance, PortfolioResult } from '../types.ts'
+import { buildResult, scoreDimension } from './engine.ts'
+import { computeCombinedMetrics } from './combinedMetrics.ts'
+import type { DimensionScore, GradeResult, VetoHit } from './types.ts'
 
 // ════════════════════════════════════════════════════════════════════════════
 // 一票否决规则（所有场景共用）
@@ -315,8 +315,10 @@ export function gradeBacktestResult(result: BacktestResult): GradeResult {
 }
 
 // ── 重新导出常用类型和工具，便于调用方一处 import ───────────────────────────
-export { GRADE_META, GRADE_THRESHOLDS } from './types'
-export type { Grade, GradeResult, DimensionScore, VetoHit, GradeMeta } from './types'
-export { worseGrade, scoreToGrade } from './engine'
-export { computeCombinedMetrics } from './combinedMetrics'
-export type { CombinedMetrics } from './combinedMetrics'
+// 注：相对路径统一带 .ts 扩展——Node --test 直跑（type-stripping 不改写
+// import 说明符）与 Vite/vue-tsc（allowImportingTsExtensions）两侧都可用。
+export { GRADE_META, GRADE_THRESHOLDS } from './types.ts'
+export type { Grade, GradeResult, DimensionScore, VetoHit, GradeMeta } from './types.ts'
+export { worseGrade, scoreToGrade } from './engine.ts'
+export { computeCombinedMetrics } from './combinedMetrics.ts'
+export type { CombinedMetrics } from './combinedMetrics.ts'

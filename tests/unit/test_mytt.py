@@ -557,3 +557,44 @@ class TestBBPandBBW:
         quiet = 100 + rng.standard_normal(60) * 0.1
         wild = 100 + rng.standard_normal(60) * 5.0
         assert MyTT.BBW(wild)[-1] > MyTT.BBW(quiet)[-1]
+
+
+class TestFilter:
+    """FILTER 无副作用（审查修复：曾原地改写输入序列）。"""
+
+    def test_filter_does_not_mutate_input(self):
+        x = np.array([1.0, 0.0, 1.0, 1.0, 1.0, 0.0, 1.0])
+        snapshot = x.copy()
+        out = MyTT.FILTER(x, 2)
+        np.testing.assert_array_equal(x, snapshot)  # 旧码把 x 原地置零，失败
+        # x[0]=1 触发 → 后 2 根置零；x[3]=1 触发 → 后 2 根置零；x[6]=1
+        np.testing.assert_array_equal(out, [1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0])
+
+    def test_filter_accepts_bool_input(self):
+        s = np.array([True, False, True, True])
+        out = MyTT.FILTER(s, 1)
+        np.testing.assert_array_equal(s, [True, False, True, True])
+        assert out.dtype == bool
+        # s[0]=True 触发 → s[1] 置零；s[2]=True 触发 → s[3] 置零（s[2] 本身保留）
+        np.testing.assert_array_equal(out, [True, False, True, False])
+
+    def test_filter_formula_series_not_polluted(self):
+        """公式场景：FILTER(C, N) 后 C 仍是原收盘序列。"""
+        from easy_tdx.formula import compile_formula
+
+        n = 30
+        close = 10.0 * np.linspace(1.0, 2.0, n)
+        df = pd.DataFrame(
+            {
+                "datetime": pd.date_range("2024-01-01", periods=n),
+                "open": close,
+                "high": close,
+                "low": close,
+                "close": close,
+                "vol": np.ones(n),
+            }
+        )
+        res = compile_formula("A: FILTER(C, 2); B: MA(C, 2);").compute(df)
+        np.testing.assert_allclose(
+            res.columns["B"], pd.Series(close).rolling(2).mean().to_numpy(), equal_nan=True
+        )

@@ -68,15 +68,20 @@ async function fillMissingNames() {
 
 // ── 行情（SSE 快照 + REST 首次兜底） ────────────────────────────────────────
 
-/** SSE 未覆盖时（自选刚加、服务重启间隙）用 REST 主动拉一次。 */
+/** SSE 未覆盖时（自选刚加、服务重启间隙）用 REST 主动拉一次。
+ *  后端 /quotes 单次最多 80 只（通达信协议上限），超量需分批。 */
+const QUOTE_BATCH = 80
+
 async function restFallback() {
   if (items.value.length === 0) return
   const missing = items.value.filter((i) => !quoteStore.getQuote(i.symbol))
   if (missing.length === 0) return
-  try {
-    await fetchQuotes(missing.map((i) => ({ market: i.market, code: i.code })))
-  } catch {
-    // SSE 会补上，静默
+  for (let i = 0; i < missing.length; i += QUOTE_BATCH) {
+    try {
+      await fetchQuotes(missing.slice(i, i + QUOTE_BATCH).map((it) => ({ market: it.market, code: it.code })))
+    } catch {
+      // SSE 会补上，静默（单批失败不阻断后续批次）
+    }
   }
 }
 

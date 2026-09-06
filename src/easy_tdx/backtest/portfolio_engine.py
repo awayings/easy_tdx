@@ -44,7 +44,9 @@ class PortfolioResult:
         equity_allocation: 每只标的的资金分配比例
         combined_equity: 组合整体净值曲线（按日期对齐各标的求和），
             列: datetime/total/drawdown/drawdown_pct。各标的独立回测日期范围
-            可能不同，此处按日期并集 forward-fill 对齐后求和。
+            可能不同，此处按日期并集 forward-fill 对齐后求和；晚上市标的的
+            前导缺口按其首个净值（=初始资金）回填，保证合并曲线首值等于
+            总投入资金。
         trades: 组合层汇总成交（各标的 concat + ``symbol`` 列标注来源标的），
             供组合级绩效统计（逐标的 FIFO 配对持仓天数）与前端明细表使用。
     """
@@ -265,7 +267,9 @@ class PortfolioBacktestEngine:
         """把各标的独立净值曲线按日期对齐求和，生成组合整体净值曲线。
 
         各标的独立回测的日期范围可能不同（取数差异、停牌等），这里取所有标的
-        datetime 的并集，每个标的的 total 列 forward-fill 对齐到并集后求和。
+        datetime 的并集，每个标的的 total 列 forward-fill 对齐到并集后求和；
+        前导缺口（晚上市标的）按其首个净值（=初始资金）回填（bfill），保证
+        合并曲线首值等于总投入资金。
 
         Returns:
             DataFrame: datetime / total / drawdown / drawdown_pct。
@@ -293,10 +297,15 @@ class PortfolioBacktestEngine:
         if not series_list:
             return empty
 
-        # 外连接对齐（并集日期），forward-fill 各标的在缺失日期的净值（持有不动），
-        # 再求和得组合总净值。缺失值填 0 是为应对某标的完全无该日期数据的情况。
+        # 外连接对齐（并集日期）：各标的在缺失日期 forward-fill（持有不动）；
+        # 前导缺口（晚上市 / 取数晚于组合起点）用每列首个有效值回填（bfill）——
+        # 资金在组合起点即已分配，建仓前按初始资金趴账，与组合 Walk-Forward 的
+        # ffill().bfill() 口径一致。此前前导缺口填 0：晚上市标的上市前贡献 0，
+        # 合并曲线首值 < 总投入资金，total_return 被系统性虚增。
+        # 退化兜底：整列全 NaN（理论不可达——无数据的标的不会进入 series_list）
+        # 显式落 0，避免 sum 传播 NaN。
         aligned = pd.concat(series_list, axis=1).sort_index()
-        aligned = aligned.ffill().fillna(0)
+        aligned = aligned.ffill().bfill().fillna(0.0)
         total = aligned.sum(axis=1)
 
         # 回撤：drawdown 为绝对回撤额（峰值-当前，正值），drawdown_pct 为相对

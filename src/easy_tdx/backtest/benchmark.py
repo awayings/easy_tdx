@@ -357,13 +357,20 @@ def evaluate_portfolio(
         **engine_kwargs,
     ).run()
 
-    # 3. 适配性体检：逐标的跑三段体检，跨标的多数口径聚合
+    # 3. 适配性体检：逐标的跑三段体检，跨标的多数口径聚合。
+    # 每标的传入各自 symbol，使 auto_fees 按品种解析费率——与组合回测主路径
+    # （PortfolioBacktestEngine 逐标的 resolve_fee_model）同口径。此前漏传
+    # symbol：ETF/可转债组合的三段体检被按股票口径错收印花税。
     fitness_kwargs: dict[str, Any] = {
         k: v for k, v in engine_kwargs.items() if k not in ("total_cash", "chanlun_level")
     }
     per_stock_fitness = [
         FitnessEngine(
-            strategy=strategy, split=split, context_bars=context_bars, **fitness_kwargs
+            strategy=strategy,
+            split=split,
+            context_bars=context_bars,
+            symbol=f"{stock.market}{stock.code}",
+            **fitness_kwargs,
         ).evaluate(stock.df)
         for stock in stocks
     ]

@@ -40,6 +40,10 @@ from easy_tdx.web.task_runner import get_runner
 
 router = APIRouter(tags=["backtest"])
 
+# 标准 TdxClient 单次 get_security_bars 取数上限（协议约束，服务器对更大
+# 请求静默截断）。所有按标的取数路径都必须经 _fetch_bars_paged 翻页。
+_BARS_PAGE_SIZE = 800
+
 
 # ── 策略枚举 ───────────────────────────────────────────────────────────────────
 
@@ -104,10 +108,9 @@ async def run_backtest_async(
     # 3. 提交后台任务
     runner = get_runner()
     task_id = runner.submit(lambda: _run_backtest(df, snapshot), description=description)
+    # 提交瞬间通常是 pending/running；极快任务可能已 done/failed，如实上报
     state = runner.get(task_id)
-    # 提交瞬间任务应是 pending/running；极端情况下线程已跑完则报实际状态
-    status: Any = state.status if state.status in ("pending", "running") else "running"
-    return TaskSubmitResponse(task_id=task_id, status=status)
+    return TaskSubmitResponse(task_id=task_id, status=state.status)
 
 
 @router.get("/backtest/tasks", response_model=TaskListResponse)
@@ -252,8 +255,7 @@ async def run_portfolio_backtest_async(
         description=description,
     )
     state = runner.get(task_id)
-    status: Any = state.status if state.status in ("pending", "running") else "running"
-    return TaskSubmitResponse(task_id=task_id, status=status)
+    return TaskSubmitResponse(task_id=task_id, status=state.status)
 
 
 # ── 多策略组合回测（资金分仓） ───────────────────────────────────────────────
@@ -285,8 +287,7 @@ async def run_multi_strategy_backtest_async(
         description=description,
     )
     state = runner.get(task_id)
-    status: Any = state.status if state.status in ("pending", "running") else "running"
-    return TaskSubmitResponse(task_id=task_id, status=status)
+    return TaskSubmitResponse(task_id=task_id, status=state.status)
 
 
 @router.post(
@@ -316,8 +317,7 @@ async def run_multi_strategy_walkforward_async(
         description=description,
     )
     state = runner.get(task_id)
-    status: Any = state.status if state.status in ("pending", "running") else "running"
-    return TaskSubmitResponse(task_id=task_id, status=status)
+    return TaskSubmitResponse(task_id=task_id, status=state.status)
 
 
 @router.post(
@@ -348,8 +348,7 @@ async def run_multi_strategy_evaluate_async(
         description=description,
     )
     state = runner.get(task_id)
-    status: Any = state.status if state.status in ("pending", "running") else "running"
-    return TaskSubmitResponse(task_id=task_id, status=status)
+    return TaskSubmitResponse(task_id=task_id, status=state.status)
 
 
 @router.post("/backtest/optimize/run/async", response_model=TaskSubmitResponse, status_code=202)
@@ -388,8 +387,7 @@ async def run_optimize_async(
         description=description,
     )
     state = runner.get(task_id)
-    status: Any = state.status if state.status in ("pending", "running") else "running"
-    return TaskSubmitResponse(task_id=task_id, status=status)
+    return TaskSubmitResponse(task_id=task_id, status=state.status)
 
 
 # ── 一键寻优所有策略 ───────────────────────────────────────────────────────────
@@ -429,8 +427,7 @@ async def run_optimize_all_async(
         description=description,
     )
     state = runner.get(task_id)
-    status: Any = state.status if state.status in ("pending", "running") else "running"
-    return TaskSubmitResponse(task_id=task_id, status=status)
+    return TaskSubmitResponse(task_id=task_id, status=state.status)
 
 
 # ── 信号雷达（一键扫描已保存策略）────────────────────────────────────────────
@@ -467,8 +464,7 @@ async def run_signal_scan_async(
         description=description,
     )
     state = runner.get(task_id)
-    status: Any = state.status if state.status in ("pending", "running") else "running"
-    return TaskSubmitResponse(task_id=task_id, status=status)
+    return TaskSubmitResponse(task_id=task_id, status=state.status)
 
 
 # ── Walk-Forward / 一条龙评估（v1.25 防过拟合链）──────────────────────────────
@@ -494,8 +490,7 @@ async def run_walkforward_async(
         lambda: _run_walkforward(df, snapshot, n_windows), description=description
     )
     state = runner.get(task_id)
-    status: Any = state.status if state.status in ("pending", "running") else "running"
-    return TaskSubmitResponse(task_id=task_id, status=status)
+    return TaskSubmitResponse(task_id=task_id, status=state.status)
 
 
 @router.post("/backtest/evaluate/run/async", response_model=TaskSubmitResponse, status_code=202)
@@ -516,8 +511,7 @@ async def run_evaluate_async(
     runner = get_runner()
     task_id = runner.submit(lambda: _run_evaluate(df, snapshot), description=description)
     state = runner.get(task_id)
-    status: Any = state.status if state.status in ("pending", "running") else "running"
-    return TaskSubmitResponse(task_id=task_id, status=status)
+    return TaskSubmitResponse(task_id=task_id, status=state.status)
 
 
 # ── 组合级 Walk-Forward / 一条龙评估（对齐单标的防过拟合链）──────────────────
@@ -550,8 +544,7 @@ async def run_portfolio_walkforward_async(
         description=description,
     )
     state = runner.get(task_id)
-    status: Any = state.status if state.status in ("pending", "running") else "running"
-    return TaskSubmitResponse(task_id=task_id, status=status)
+    return TaskSubmitResponse(task_id=task_id, status=state.status)
 
 
 @router.post(
@@ -581,8 +574,7 @@ async def run_portfolio_evaluate_async(
         description=description,
     )
     state = runner.get(task_id)
-    status: Any = state.status if state.status in ("pending", "running") else "running"
-    return TaskSubmitResponse(task_id=task_id, status=status)
+    return TaskSubmitResponse(task_id=task_id, status=state.status)
 
 
 async def _resolve_df(client: Any, req: BacktestRequest) -> pd.DataFrame:
@@ -606,19 +598,10 @@ async def run_multiseed_async(
     平均收益）。结果含 per_seed_positive_ratio 稳定性列，通过
     GET /backtest/tasks/{task_id} 轮询。
     """
-    from easy_tdx.web.convert import category_from_str, market_from_str
-
     stock_dfs: dict[str, pd.DataFrame] = {}
     for symbol in req.stocks:
-        market_str, code = symbol.split(":", 1)
         try:
-            page = await client.get_security_bars(
-                market_from_str(market_str),
-                code,
-                category_from_str(req.category),
-                0,
-                req.count,
-            )
+            page = await _fetch_bars_paged(client, symbol, req.category, req.count)
         except Exception:  # noqa: BLE001 — 单标的失败跳过
             continue
         if len(page) >= 30:
@@ -631,8 +614,7 @@ async def run_multiseed_async(
     runner = get_runner()
     task_id = runner.submit(lambda: _run_multiseed(stock_dfs, snapshot), description=description)
     state = runner.get(task_id)
-    status: Any = state.status if state.status in ("pending", "running") else "running"
-    return TaskSubmitResponse(task_id=task_id, status=status)
+    return TaskSubmitResponse(task_id=task_id, status=state.status)
 
 
 def _run_multiseed(stock_dfs: dict[str, pd.DataFrame], req: MultiSeedRequest) -> dict[str, Any]:
@@ -781,15 +763,10 @@ async def run_rotation_async(
     可选槽内止盈止损。打分支持内置动量（``score="momentum"`` + ``period``）
     或通达信公式数值输出（``score="formula"`` + ``formula_text`` + ``score_col``）。
     """
-    from easy_tdx.web.convert import category_from_str, market_from_str
-
     stock_dfs: dict[str, pd.DataFrame] = {}
     for symbol in req.stocks:
-        market_str, code = symbol.split(":", 1)
         try:
-            page = await client.get_security_bars(
-                market_from_str(market_str), code, category_from_str(req.category), 0, req.count
-            )
+            page = await _fetch_bars_paged(client, symbol, req.category, req.count)
         except Exception:  # noqa: BLE001 — 单标的失败跳过
             continue
         if page is not None and len(page) >= 30:
@@ -802,8 +779,7 @@ async def run_rotation_async(
     runner = get_runner()
     task_id = runner.submit(lambda: _run_rotation(stock_dfs, snapshot), description=description)
     state = runner.get(task_id)
-    status: Any = state.status if state.status in ("pending", "running") else "running"
-    return TaskSubmitResponse(task_id=task_id, status=status)
+    return TaskSubmitResponse(task_id=task_id, status=state.status)
 
 
 def _run_rotation(
@@ -916,18 +892,44 @@ def _normalize_bars_dt(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-async def _fetch_bars(client: Any, symbol: str, category: str, count: int) -> pd.DataFrame:
-    """按标的取 K 线（async，必须在 event loop 内调用）。"""
+async def _fetch_bars_paged(client: Any, symbol: str, category: str, count: int) -> pd.DataFrame:
+    """按 800/页翻页取最多 ``count`` 根 K 线，返回时间升序 DataFrame。
+
+    TDX 协议单次 get_security_bars 最多返回 800 根：count>800 的单次调用会被
+    服务器静默截断（multiseed / rotation / formula 曾各自单页取数，悄悄少
+    数据）。本辅助按 start=0,800,1600… 翻页拼接，页间按时间升序排序；
+    末页不足 800 根视为数据起点，提前停止。列结构与 get_security_bars
+    原始输出一致（日线 ``date`` / 分钟 ``datetime``），不做改名/类型规整。
+    """
     from easy_tdx.web.convert import category_from_str, market_from_str
 
     market_str, code = symbol.split(":", 1)
-    df = await client.get_security_bars(
-        market_from_str(market_str),
-        code,
-        category_from_str(category),
-        0,
-        count,
-    )
+    market = market_from_str(market_str)
+    cat = category_from_str(category)
+    frames: list[pd.DataFrame] = []
+    fetched = 0
+    while fetched < count:
+        page_size = min(_BARS_PAGE_SIZE, count - fetched)
+        page_df = await client.get_security_bars(market, code, cat, fetched, page_size)
+        if page_df is None or len(page_df) == 0:
+            break
+        frames.append(page_df)
+        fetched += len(page_df)
+        if len(page_df) < page_size:
+            break  # 数据起点
+    if not frames:
+        return pd.DataFrame()
+    df = pd.concat(frames, ignore_index=True)
+    dt_col = "datetime" if "datetime" in df.columns else "date"
+    if dt_col in df.columns:
+        # 页间天然逆序（page0=最新一页），拼接后按时间升序
+        df = df.sort_values(dt_col).reset_index(drop=True)
+    return df
+
+
+async def _fetch_bars(client: Any, symbol: str, category: str, count: int) -> pd.DataFrame:
+    """按标的取 K 线（async，必须在 event loop 内调用）。"""
+    df = await _fetch_bars_paged(client, symbol, category, count)
     if len(df) == 0:
         raise ValueError(f"标的 {symbol} 未取到任何 K 线数据")
     return _normalize_bars_dt(df)
@@ -1182,31 +1184,67 @@ def _run_multi_strategy_evaluate(
     )
 
 
+def _resolve_effective_fees(
+    auto_fees: bool,
+    symbol: str | None,
+    commission: float,
+    min_commission: float,
+    stamp_tax: float,
+) -> tuple[float, float, float]:
+    """auto_fees 品种费率解析（与 BacktestEngine 同款口径）。
+
+    显式非默认值优先（调用方有意覆盖），默认值按品种费率表替换（如
+    ETF/可转债免印花税）。ParamGridOptimizer 无 auto_fees 参数，寻优端点
+    在 web 层预解析成具体费率再传入，保证与单标的回测同口径。
+    """
+    if not auto_fees or not symbol:
+        return commission, min_commission, stamp_tax
+    from easy_tdx.backtest.fees import resolve_fee_model
+
+    fee = resolve_fee_model(symbol)
+    if commission == 0.0003:
+        commission = fee.commission
+    if min_commission == 5.0:
+        min_commission = fee.min_commission
+    if stamp_tax == 0.001:
+        stamp_tax = fee.stamp_tax
+    return commission, min_commission, stamp_tax
+
+
 def _run_optimize(df: pd.DataFrame, req: OptimizeBacktestRequest) -> dict[str, Any]:
     """执行参数网格寻优并返回清洗后的结果字典（后台线程内调用）。"""
     from easy_tdx.backtest.benchmark import run_buy_hold_benchmark
     from easy_tdx.backtest.optimizer import ParamGridOptimizer
 
+    commission, min_commission, stamp_tax = _resolve_effective_fees(
+        req.auto_fees, req.symbol, req.commission, req.min_commission, req.stamp_tax
+    )
     optimizer = ParamGridOptimizer(
         strategy_name=req.strategy,
         param_grid=req.param_grid,
         df=df,
         cash=req.cash,
-        commission=req.commission,
+        commission=commission,
+        min_commission=min_commission,
+        stamp_tax=stamp_tax,
         slippage=req.slippage,
         execution=req.execution,
         workers=req.workers,
     )
     result = optimizer.run()
     out = result.to_dict()
-    # 买入持有基准（同区间/同费率/同资金，与一条龙评估同口径），
-    # 供前端在最优结果旁直观对比「策略 vs 买入不动」。
+    # 买入持有基准（同区间/同费率/同资金，与一条龙评估同口径），供前端在
+    # 最优结果旁直观对比「策略 vs 买入不动」。
     out["buy_hold"] = run_buy_hold_benchmark(
         df,
         cash=req.cash,
-        commission=req.commission,
+        commission=commission,
+        min_commission=min_commission,
+        stamp_tax=stamp_tax,
         slippage=req.slippage,
         execution=req.execution,
+        symbol=req.symbol,
+        auto_fees=req.auto_fees,
     )
     return out
 

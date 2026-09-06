@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from easy_tdx.backtest.multi_strategy_engine import (
     MultiStrategyEngine,
@@ -205,6 +206,31 @@ class TestMultiStrategyEngine:
         result = engine.run()
         # 合并曲线长度应至少覆盖两个范围的最晚结束日（并集）
         assert len(result.combined_equity) >= 60
+
+    def test_total_return_capital_weighted_with_disjoint_dates(self) -> None:
+        """晚起步槽位建仓前应按初始资金趴账（合并曲线首值=总投入资金）。
+
+        回归：旧实现对日期并集的前导缺口填 0——B 槽位起步前贡献 0 而非其
+        分得的 50 万，合并曲线首值 = 50 万 < 总资金 100 万，total_return 被虚增。
+        正确口径：前导缺口用每列首个有效值（=初始资金）回填（bfill）。
+        """
+        df_a = _make_df(60, seed=1, start="2024-01-01")
+        df_b = _make_df(60, seed=2, start="2024-03-01")
+        slots = [
+            StrategySlot("A", "SH:601088", SimpleBuyStrategy(), df_a),
+            StrategySlot("B", "SZ:000001", SimpleBuyStrategy(), df_b),
+        ]
+        result = MultiStrategyEngine(slots, total_cash=1_000_000).run()
+
+        # 合并曲线首值 = 总投入资金（旧实现 = 500000，缺晚起步槽位的资金）
+        assert result.combined_equity["total"].iloc[0] == pytest.approx(1_000_000.0)
+
+        # total_return == 各槽位资金加权真实收益
+        weighted = sum(
+            0.5 * res.performance.get("total_return", 0.0)
+            for res in result.individual_results.values()
+        )
+        assert result.total_performance["total_return"] == pytest.approx(weighted, abs=1e-9)
 
     def test_empty_strategies_returns_empty_result(self) -> None:
         """空策略列表应返回空结果，不抛异常。"""

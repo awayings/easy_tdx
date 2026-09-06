@@ -3,18 +3,22 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Query
+from fastapi import Path as PathParam
 from pydantic import BaseModel, Field
 
 from easy_tdx.web.watchlist_store import get_watchlist_store
 
 router = APIRouter(tags=["watchlist"])
 
+# 6 位数字代码（自选会被 QuoteStreamer 拿去轮询，非数字代码产生无效请求）
+_CODE_PATTERN = r"^\d{6}$"
+
 
 class WatchItemAdd(BaseModel):
     """加入自选请求。name 由前端从行情数据带过来。"""
 
     market: str = Field(..., pattern=r"^(SZ|SH|BJ)$")
-    code: str = Field(..., min_length=6, max_length=6)
+    code: str = Field(..., pattern=_CODE_PATTERN)
     name: str = Field("", max_length=64)
     group: str = Field("默认", max_length=32)
 
@@ -41,7 +45,10 @@ async def add_watch_item(req: WatchItemAdd) -> dict[str, object]:
 
 
 @router.delete("/watchlist/{market}/{code}", response_model=dict[str, object])
-async def remove_watch_item(market: str, code: str) -> dict[str, object]:
+async def remove_watch_item(
+    market: str,
+    code: str = PathParam(..., pattern=_CODE_PATTERN, description="6位数字代码"),
+) -> dict[str, object]:
     """移除自选。"""
     if market.upper() not in {"SZ", "SH", "BJ"}:
         raise HTTPException(status_code=400, detail=f"非法市场: {market}")

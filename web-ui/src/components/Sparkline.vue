@@ -35,7 +35,9 @@ const geom = computed(() => {
 </script>
 
 <template>
-  <svg :width="W" :height="H" class="sparkline" viewBox="0 0 92 28" preserveAspectRatio="none">
+  <!-- viewBox 必须跟随 width/height：几何坐标按 W/H 计算，写死 92×28 会让
+       传大尺寸的调用方（Dashboard 150×30）右侧被 viewport 裁剪 -->
+  <svg :width="W" :height="H" class="sparkline" :viewBox="`0 0 ${W} ${H}`" preserveAspectRatio="none">
     <template v-if="geom">
       <line
         v-if="geom.baseValid"
@@ -56,7 +58,7 @@ const geom = computed(() => {
         vector-effect="non-scaling-stroke"
       />
     </template>
-    <text v-else x="46" y="18" text-anchor="middle" fill="#5c6370" font-size="9">加载中…</text>
+    <text v-else :x="W / 2" :y="H - 10" text-anchor="middle" fill="#5c6370" font-size="9">加载中…</text>
   </svg>
 </template>
 

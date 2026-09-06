@@ -183,9 +183,13 @@ def EXIST(S, N):  # EXIST(CLOSE>3010, N=5)  n日内是否存在一天大于3000�
 
 
 def FILTER(S, N):  # FILTER函数，S满足条件后，将其后N周期内的数据置为0, FILTER(C==H,5)
-    for i in range(len(S)):
-        S[i + 1 : i + 1 + N] = 0 if S[i] else S[i + 1 : i + 1 + N]
-    return S  # 例：FILTER(C==H,5) 涨停后，后5天不再发出信号
+    # 无副作用实现：在副本上置零。曾直接改写输入序列——公式通道里
+    # FILTER(C, N) 会把同一公式后续语句引用的 C 一并污染（或对只读
+    # 数组直接报错）。
+    out = np.array(S, copy=True)
+    for i in range(len(out)):
+        out[i + 1 : i + 1 + N] = 0 if out[i] else out[i + 1 : i + 1 + N]
+    return out  # 例：FILTER(C==H,5) 涨停后，后5天不再发出信号
 
 
 def BARSLAST(S):  # 上一次条件成立到当前的周期, BARSLAST(C/REF(C,1)>=1.1) 上一次涨停到今天的天数

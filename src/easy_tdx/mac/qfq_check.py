@@ -145,7 +145,9 @@ def detect_ex_dividend_gaps(
     with np.errstate(divide="ignore", invalid="ignore"):
         ratio = open_arr[1:] / prev_close[:-1] - 1.0
     out: list[str] = []
-    for i in np.where(~np.isfinite(ratio) | (ratio < threshold))[0]:
+    # 仅「有限且低于阈值」计跳空：前收缺失（NaN/0）产生的非有限比率是数据
+    # 缺口而非除权（除权跳空必然是有限值），计入只会制造假 unexplained_gap。
+    for i in np.where(np.isfinite(ratio) & (ratio < threshold))[0]:
         out.append(_fmt(df["_dt"].iloc[i + 1]))
     return out
 

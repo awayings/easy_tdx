@@ -196,14 +196,26 @@ class TaskStore:
             conn.close()
         return self._row_to_dict(row) if row is not None else None
 
-    def list_recent(self, limit: int = 20) -> list[dict[str, Any]]:
-        """按 created_at 倒序列出最近 N 条任务摘要（含 result，供详情直取）。"""
+    def list_recent(self, limit: int = 20, *, include_results: bool = True) -> list[dict[str, Any]]:
+        """按 created_at 倒序列出最近 N 条任务摘要。
+
+        Args:
+            limit: 最多返回条数。
+            include_results: True（默认）= 含 result（详情直取）；False = 不
+                SELECT/解析 ``result_json``——列表页只展示摘要，用它避免把
+                几百条大结果 JSON 拖进内存逐条解析（result 字段为 None）。
+        """
         conn = self._connect()
         try:
+            cols = (
+                "*"
+                if include_results
+                else "task_id, status, description, created_at, started_at, "
+                "finished_at, error, NULL"
+            )
             cur = conn.execute(
-                """
-                SELECT task_id, status, description, created_at, started_at,
-                       finished_at, error, result_json
+                f"""
+                SELECT {cols}
                 FROM backtest_tasks
                 ORDER BY created_at DESC, task_id DESC
                 LIMIT ?
@@ -314,7 +326,7 @@ class _NullTaskStore(TaskStore):
     def load(self, task_id: str) -> dict[str, Any] | None:  # noqa: ARG002
         return None
 
-    def list_recent(self, limit: int = 20) -> list[dict[str, Any]]:  # noqa: ARG002
+    def list_recent(self, limit: int = 20, *, include_results: bool = True) -> list[dict[str, Any]]:  # noqa: ARG002
         return []
 
     def delete(self, task_id: str) -> bool:  # noqa: ARG002

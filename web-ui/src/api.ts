@@ -646,7 +646,9 @@ export async function fetchRankList(
     const r = { ...row } as Record<string, unknown>
     r.price = close
     r.change_pct = pre > 0 ? (close / pre - 1) * 100 : 0
-    r.market = Number(row.market) === 1 ? 'SH' : 'SZ'
+    // 与 fetchBoardMembers 同口径：MAC 协议 market 1=SH / 2=BJ / 其余 SZ
+    const m = Number(row.market)
+    r.market = m === 1 ? 'SH' : m === 2 ? 'BJ' : 'SZ'
     return r as RankRow
   })
 }
@@ -799,6 +801,9 @@ export async function fetchLlmChatTask(taskId: string): Promise<TaskState> {
  *
  * 大报告解读 1-3 分钟属正常：轮询间隔放宽到 1.5s（回测是 0.3s），
  * 前端上限 20 分钟兜底（后端 LLM 读超时最大 600s，正常应先于此前返回）。
+ *
+ * @param signal 可选中止信号：弹窗等调用方卸载时 abort，循环立即以
+ *               name='AbortError' 的错误退出，不再继续轮询。
  */
 export async function runLlmChatWithPolling(
   prompt: string,
@@ -806,11 +811,13 @@ export async function runLlmChatWithPolling(
   onPoll?: (state: TaskState) => void,
   intervalMs = 1_500,
   timeoutMs = 20 * 60_000,
+  signal?: AbortSignal,
 ): Promise<TaskState> {
   const { task_id } = await submitLlmChatTask(prompt, context)
   const start = Date.now()
   // eslint-disable-next-line no-constant-condition
   while (true) {
+    if (signal?.aborted) throw abortError()
     const state = await fetchLlmChatTask(task_id)
     onPoll?.(state)
     if (state.status === 'done' || state.status === 'failed') return state
@@ -818,7 +825,13 @@ export async function runLlmChatWithPolling(
       throw new Error(`AI 解读任务超时（${timeoutMs / 1000}s），任务仍在后台运行，可稍后重试`)
     }
     await new Promise((r) => setTimeout(r, intervalMs))
+    if (signal?.aborted) throw abortError()
   }
+}
+
+/** 构造与 fetch 中止一致的 AbortError（便于调用方按 name 识别并静默）。 */
+function abortError(): Error {
+  return new DOMException('AI 解读已取消', 'AbortError')
 }
 
 // ── AI 解读历史 ──────────────────────────────────────────────────────────────

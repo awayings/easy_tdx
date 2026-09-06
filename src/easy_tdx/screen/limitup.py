@@ -17,7 +17,6 @@
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -34,13 +33,25 @@ __all__ = [
 ]
 
 
-def _round_price(x: float) -> float:
-    """四舍五入到分（Python round 是银行家舍入，交易所是四舍五入，不能混用）。"""
-    return math.floor(x * 100 + 0.5) / 100
+def _to_cents(price: float) -> int:
+    """元 → 分。.day 价格本身按 ×100 存 uint，round 消除读回的浮点表示误差。"""
+    return int(round(price * 100))
 
 
-def _eq_price(a: float, b: float) -> bool:
-    return abs(a - b) < 1e-4
+def _limit_price_cents(prev_cents: int, pct: int) -> int:
+    """交易所涨跌停价（分）：前收 × (1 ± pct%)，四舍五入到分（半进位）。
+
+    纯整数运算 ``(prev_cents * (100 + pct) + 50) // 100``，与交易所逐价位
+    对账零差异。不能用 float 乘完再 ``floor(x*100+0.5)``：乘法在半分边界
+    受浮点表示误差影响，±10% 档 67/318 个、±5% 档 90/884 个价位会算低
+    1 分（如 33.05×1.1 → 误算 36.35，交易所 36.36），导致真实涨跌停被漏判。
+    """
+    return (prev_cents * (100 + pct) + 50) // 100
+
+
+def _limit_price(prev: float, pct: int) -> float:
+    """交易所涨跌停价（元）：pct 为整数百分数（正=涨停档，负=跌停档）。"""
+    return _limit_price_cents(_to_cents(prev), pct) / 100.0
 
 
 def _limit_ratio(code: str) -> float:
@@ -113,27 +124,29 @@ def _entry_from_closes(
     pct = (closes[-1] / prev - 1.0) * 100.0
     entry = LimitUpEntry(code=code, market=market, pct=round(pct, 2))
 
-    up_ratio = _limit_ratio(code)
-    limit_up_price = _round_price(prev * (1 + up_ratio))
+    up_pct = 20 if _limit_ratio(code) == 0.20 else 10
+    # 全程分币整数比较，杜绝浮点舍入在半分边界错 1 分（漏判涨跌停）
+    cents = [_to_cents(c) for c in closes]
+    high_cents = _to_cents(last_high)
+    prev_c = cents[-2]
+    limit_up_c = _limit_price_cents(prev_c, up_pct)
+    limit_down_c = _limit_price_cents(prev_c, -up_pct)
     # 主板 5%：疑似 ST 涨停。低价股（< 3 元）最小报价单位 0.01 占比过大，
     # +5% 整的巧合概率骤增，跳过 ST 判定（宁可漏报不误报）。
-    st_applicable = up_ratio == 0.10 and prev >= 3.0
-    st_price = _round_price(prev * 1.05) if st_applicable else None
-    limit_down_price = _round_price(prev * (1 - up_ratio))
-    st_down_price = _round_price(prev * 0.95) if st_applicable else None
-
-    def _eq(a: float, b: float) -> bool:
-        return abs(a - b) < 1e-4
+    st_applicable = up_pct == 10 and prev >= 3.0
+    st_price_c = _limit_price_cents(prev_c, 5) if st_applicable else None
+    st_down_price_c = _limit_price_cents(prev_c, -5) if st_applicable else None
 
     def _is_up(i: int) -> bool:
-        """第 i 根是否涨停（用第 i-1 根收盘作前收）。"""
+        """第 i 根是否涨停（用第 i-1 根收盘作前收；ST/3 元门槛逐 bar 判定，
+        避免「按最新前收定性整段历史」在价格穿越 3 元时漏计/多计）。"""
         if i < 1:
             return False
-        p = closes[i - 1]
-        c = closes[i]
-        if _eq(c, _round_price(p * (1 + up_ratio))):
+        p_c = cents[i - 1]
+        c_c = cents[i]
+        if c_c == _limit_price_cents(p_c, up_pct):
             return True
-        return st_applicable and _eq(c, _round_price(p * 1.05))
+        return up_pct == 10 and p_c >= 300 and c_c == _limit_price_cents(p_c, 5)
 
     # 连板高度（截至最后一根）
     streak = 0
@@ -142,28 +155,28 @@ def _entry_from_closes(
         streak += 1
         i -= 1
     entry.streak = streak
-    entry.st = bool(streak > 0 and st_price is not None and _eq(closes[-1], st_price))
+    entry.st = bool(streak > 0 and st_price_c is not None and cents[-1] == st_price_c)
 
     if streak > 0:
         entry.blown = False
         return entry
 
-    # 未封住的场合：炸板（high 触及涨停价）或跌停
-    if _eq(last_high, limit_up_price):
+    # 未封住的场合：炸板（high 触及涨停价）或跌停。
+    # 口径说明：炸板仅按 10%/20% 档判定——.day 文件无法识别 ST，若对主板
+    # 额外按 5% 判炸板，非 ST 股恰好摸到 +5.00% 的会误报，故维持漏报方向。
+    if high_cents == limit_up_c:
         entry.blown = True
         return entry
 
-    if _eq(closes[-1], limit_down_price) or (
-        st_down_price is not None and _eq(closes[-1], st_down_price)
-    ):
+    if cents[-1] == limit_down_c or (st_down_price_c is not None and cents[-1] == st_down_price_c):
         down_streak = 0
         j = len(closes) - 1
         while j >= 1:
-            p = closes[j - 1]
-            c = closes[j]
-            hit = _eq(c, _round_price(p * (1 - up_ratio)))
-            if not hit and st_applicable:
-                hit = _eq(c, _round_price(p * 0.95))
+            p_c = cents[j - 1]
+            c_c = cents[j]
+            hit = c_c == _limit_price_cents(p_c, -up_pct) or (
+                up_pct == 10 and p_c >= 300 and c_c == _limit_price_cents(p_c, -5)
+            )
             if not hit:
                 break
             down_streak += 1
@@ -300,22 +313,21 @@ def compute_limitup_history(
             n_files += 1
             if n_files >= max_files:
                 break
-            up_ratio = _limit_ratio(code)
-            closes = [b.close for b in tail]
+            up_pct = 20 if _limit_ratio(code) == 0.20 else 10
+            cents = [_to_cents(b.close) for b in tail]
             date_ints = [b.year * 10000 + b.month * 100 + b.day for b in tail]
             for i in range(1, len(tail)):
-                p, c = closes[i - 1], closes[i]
-                if p <= 0:
+                p_c, c_c = cents[i - 1], cents[i]
+                if p_c <= 0:
                     continue
-                st_applicable = up_ratio == 0.10 and p >= 3.0
                 d = date_ints[i]
                 bucket = counts.setdefault(d, {"limit_up": 0, "limit_down": 0})
-                if _eq_price(c, _round_price(p * (1 + up_ratio))) or (
-                    st_applicable and _eq_price(c, _round_price(p * 1.05))
+                if c_c == _limit_price_cents(p_c, up_pct) or (
+                    up_pct == 10 and p_c >= 300 and c_c == _limit_price_cents(p_c, 5)
                 ):
                     bucket["limit_up"] += 1
-                elif _eq_price(c, _round_price(p * (1 - up_ratio))) or (
-                    st_applicable and _eq_price(c, _round_price(p * 0.95))
+                elif c_c == _limit_price_cents(p_c, -up_pct) or (
+                    up_pct == 10 and p_c >= 300 and c_c == _limit_price_cents(p_c, -5)
                 ):
                     bucket["limit_down"] += 1
         if n_files >= max_files:

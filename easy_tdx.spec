@@ -3,7 +3,9 @@
 
 构建前提（CI 会自动完成，本地手动构建需自行执行）::
 
-    1. pip install -e ".[web]" pyinstaller
+    1. pip install -e ".[web,packaging,baostock]" pyinstaller
+       # baostock 为 EXE 内置兜底数据源（见下方 hiddenimports），缺它会
+       # 被 spec 顶部的显式检查拦下——这是有意设计，防止静默产出无兜底的 EXE
     2. cd web-ui && npm ci && npm run build   # 产出 web-ui/dist/
     3. pyinstaller easy_tdx.spec              # 产出 dist/easy-tdx.exe
 
@@ -24,8 +26,19 @@ from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 hiddenimports: list[str] = []
 hiddenimports += collect_submodules("uvicorn")
 hiddenimports += collect_submodules("easy_tdx")
-# baostock 兜底数据源（v1.33：/bars 与 warehouse 的最后一级回退）在
+# baostock 兜底数据源（/bars 与 warehouse 的最后一级回退）在
 # sources/baostock.py 里经 importlib 懒加载，静态分析扫不到，需显式声明。
+# 显式检查而非依赖 collect_submodules 的失败形态（不同 PyInstaller 版本下
+# 可能返回空列表静默跳过）——缺 baostock 时立即报错，防止静默产出
+# 「兜底源缺失」的 EXE（运行期 /bars 自动回退静默失效，极难排查）。
+import importlib.util
+
+if importlib.util.find_spec("baostock") is None:
+    raise SystemExit(
+        "打包错误: 未找到 baostock——EXE 内置兜底数据源需要它。"
+        '请先执行 pip install baostock（或 pip install -e ".[web,packaging,baostock]"）'
+        "再运行 pyinstaller easy_tdx.spec"
+    )
 hiddenimports += collect_submodules("baostock")
 # pandas / numpy / scipy 由 PyInstaller 自带 hook 处理（见
 # PyInstaller/hooks/hook-pandas.* 等），无需手动 collect_submodules——

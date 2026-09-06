@@ -153,3 +153,52 @@ def test_is_trading_hours() -> None:
     assert _is_trading_hours(datetime(2026, 9, 1, 10, 0, tzinfo=tz)) is True  # 周二盘中
     assert _is_trading_hours(datetime(2026, 9, 1, 3, 0, tzinfo=tz)) is False  # 凌晨
     assert _is_trading_hours(datetime(2026, 9, 5, 10, 0, tzinfo=tz)) is False  # 周六
+
+
+# ── /watchlist 端点 code 格式校验（v1.32.6）─────────────────────────────────
+
+
+def _watch_app(monkeypatch, tmp_path):
+    from fastapi import FastAPI
+
+    from easy_tdx.web import watchlist_store as ws
+    from easy_tdx.web.errors import register_exception_handlers
+    from easy_tdx.web.routers import watchlist as watchlist_mod
+
+    monkeypatch.setenv("EASY_TDX_CONFIG_DIR", str(tmp_path / "cfg"))
+    ws._store = None
+
+    app = FastAPI()
+    register_exception_handlers(app)
+    app.include_router(watchlist_mod.router, prefix="/api/v1")
+    return app
+
+
+def test_watchlist_add_rejects_non_numeric_code(monkeypatch, tmp_path):
+    """code 非 6 位数字 → 422（旧实现可把 'abcdef' 存进自选并喂给轮询器）。"""
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+
+    app = _watch_app(monkeypatch, tmp_path)
+    with TestClient(app) as client:
+        bad = client.post("/api/v1/watchlist", json={"market": "SZ", "code": "abcdef", "name": "x"})
+        assert bad.status_code == 422
+        short = client.post(
+            "/api/v1/watchlist", json={"market": "SZ", "code": "00001", "name": "x"}
+        )
+        assert short.status_code == 422
+        ok = client.post(
+            "/api/v1/watchlist", json={"market": "SZ", "code": "000001", "name": "平安银行"}
+        )
+        assert ok.status_code == 200
+
+
+def test_watchlist_remove_validates_code_format(monkeypatch, tmp_path):
+    """remove 路径 code 非 6 位数字 → 422，不触达存储。"""
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+
+    app = _watch_app(monkeypatch, tmp_path)
+    with TestClient(app) as client:
+        resp = client.delete("/api/v1/watchlist/SZ/abc123")
+        assert resp.status_code == 422

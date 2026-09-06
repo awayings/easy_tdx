@@ -4,8 +4,8 @@
  * 这一层是纯函数 + 零业务依赖，所有场景（单标的/组合/寻优）共用。
  */
 
-import { GRADE_THRESHOLDS, type DimensionScore, type Grade, type GradeResult, type VetoHit } from './types'
-import { THRESHOLDS, type DimensionKey } from './thresholds'
+import { GRADE_THRESHOLDS, type DimensionScore, type Grade, type GradeResult, type VetoHit } from './types.ts'
+import { THRESHOLDS, type DimensionKey } from './thresholds.ts'
 
 /**
  * 按锚点列表做线性插值，返回 0–100 的分数。

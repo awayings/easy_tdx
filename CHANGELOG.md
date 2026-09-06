@@ -2,6 +2,48 @@
 
 本文件记录 easy-tdx 的版本变更。格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/)。
 
+## [1.32.6] — 2026-09-06
+
+**两周改动深度审查后的全面修复**——对 v1.21→v1.32.5 的 249 个文件、4.2 万行改动做六路专项审查，本轮落地全部修复：回测数字可信性（组合收益虚增 / 轮动停牌成交 / WF 指标稀释三件套）、LLM 安全加固（封死 file:// 读取与 API Key 外送链）、涨跌停价舍入漏判、数据源与缓存正确性、前端请求竞态等，共 58 处行为修复、约 60 条"先红后绿"回归测试。
+
+### 回测正确性（影响数字可信性，建议重点升级）
+
+- **组合收益不再虚增**（[portfolio_engine.py](src/easy_tdx/backtest/portfolio_engine.py)、[multi_strategy_engine.py](src/easy_tdx/backtest/multi_strategy_engine.py)）：组合内标的起始日期不齐时（次新股/取数截断），合并净值曲线前导缺口旧代码填 0，导致曲线首值小于总投入、`total_return` 被系统性虚增（实测两标的各投 10 万可显示 +126%，真实约 +13%）；改为前导缺口按初始资金回填，与组合 Walk-Forward 口径一致，`total_return` 恒等于资金加权收益率。
+- **轮动回测停牌日不再按过期价成交**（[rotation.py](src/easy_tdx/backtest/rotation.py)）：停牌日挂单此前会以停牌前旧开盘价成交（实测卖出价虚增 43%）；改为当日真实有交易才可成交，挂单顺延至复牌开盘，符合真实挂单语义。另修：首个调仓日照常产生信号、历史不足 5 根的次新股不再以 0 分混入买入候选。
+- **单标的 Walk-Forward 逐窗指标不再被预热区稀释**（[walkforward.py](src/easy_tdx/backtest/walkforward.py)）：上下文预热 bar 此前计入窗口绩效，默认参数下逐窗 sharpe/年化被零收益段大幅稀释（实测 8.84 vs 正确 14.96）；改为只用窗内净值与成交计算，与组合级同口径。另修：`worst_drawdown` 方向取反、单窗不足 20 根强制跳过、窗口失败记 warning 不再静默、int 日期列窗口标签显示 1970-01-01。
+- **评分容错**（[grading.py](src/easy_tdx/backtest/grading.py)）：组合回撤序列缺行/NaN 不再截断或放大水下期计数；组合级"适配性体检"对 ETF/可转债组合按品种费率解析（此前错收股票印花税）。
+
+### 安全
+
+- **LLM 接口加固**（[ai/llm.py](src/easy_tdx/ai/llm.py)）：`api_url` 仅允许 http/https 且禁止携带 URL 凭据（封死 `file://` 读本地配置文件与内网 SSRF 链）；HTTP 错误不再回显原始响应体（改为只提取 provider 错误 message，杜绝错误通道变任意内容回读）；响应体 2MB 上限；配置文件原子写（崩溃不再半写损坏）；手工编辑的 llm.json 坏字段自动回退默认并告警，不再打挂全部 AI 端点；anthropic 路径思考型模型空正文给出可操作报错而非静默空回复。
+
+### 数据与统计
+
+- **涨跌停价舍入修复**（[limitup.py](src/easy_tdx/screen/limitup.py)）：旧浮点实现 `floor(x*100+0.5)` 在半分边界受浮点误差影响，±10% 档 67/318 个、±5% 档 90 个价位会算低 1 分（如 33.05×1.1 误算 36.35，交易所 36.36），真实涨跌停被静默漏判；改为纯整数分币运算，全价位对账与交易所零差异。涨停家数/连板高度/炸板率/离线回补一并修正，ST 5% 与 3 元低价门槛改为逐 bar 判定。
+- **时区统一沪市时间**（[session.py](src/easy_tdx/realtime/session.py) 等）：`is_trading_time`、情绪采样、warehouse provisional 标记/转正、热点"今日"列此前用主机本地时区，非中国时区主机上情绪页永久无数据、当日 K 线被长期标 provisional；统一为固定 UTC+8（中国无夏令时），与主机时区无关。
+- **warehouse 增量同步**（[sync.py](src/easy_tdx/warehouse/sync.py)、[store.py](src/easy_tdx/warehouse/store.py)）：停用超过约三周后再同步，尾部 15 根覆盖不到的缺口此前永久丢失且 summary 照常 ok；现在检测到缺口自动全量重拉并告警。provisional 盘中临时值改为"拉取成功后仅转正到本次拉到的最新 bar"，数据源失败不再把未定值洗成 completed。
+- **baostock 兜底**（[sources/baostock.py](src/easy_tdx/sources/baostock.py)）：真故障（登录失败/查询报错）改为记日志并抛错，仅真无数据返回空，`--source baostock` 不再静默"无数据"；周/月线去掉服务端明确报错的 `tradestatus` 字段（实测 error_code=10004012——周/月兜底此前从未工作过）；指数兜底 vol 按实测（sh.000001）从股换算为手对齐 /bars/index 契约；`/bars` 数字周期串（如 `category=4`）不再绕过兜底。
+- **ccpm**：中金所页面结构变更时抛 `CcpmError` 并附结构线索，不再静默返回空表被当成"无数据"。
+- **Web API 正确性**（[board_mac.py](src/easy_tdx/web/routers/board_mac.py)、[market.py](src/easy_tdx/web/routers/market.py)、[schemas.py](src/easy_tdx/web/schemas.py)、[bars.py](src/easy_tdx/web/routers/bars.py) 等）：板块总览/涨停缓存键补齐 `count`/`vipdoc`（15s TTL 内不同参数不再互相串台）；响应 NaN 递归清洗且先清洗后入缓存（一行 NaN 导致稳定 500 的问题消除）；回测/寻优/公式端点 `count>800` 改分页取全量（TDX 单次协议上限，此前静默截短回测窗口）；任务提交响应透传真实状态（极快完成的任务不再谎报 running）；任务淘汰不再把未起跑的 pending 淘汰成"永久 pending 幽灵"。
+
+### 公式解析
+
+- [formula.py](src/easy_tdx/formula.py)、[MyTT.py](src/easy_tdx/MyTT.py)：FILTER 不再原地改写输入序列（`FILTER(C,2); MA(C,2)` 的 MA 此前被污染）；值域兜底收严（RSI/100、价格比率等 0~1 数值列不再被误判为买卖信号列）；解析深度上限 100 层（5000 层嵌套从 RecursionError 裸崩改为 FormulaError）；REF 负移位显式禁止（未来函数入口不再依赖类型巧合拦截）。
+
+### 前端
+
+- **请求竞态守卫**（[HotspotView.vue](web-ui/src/views/HotspotView.vue)、HotspotCorrelation、BoardOverviewView、BoardDialog 四处同款）：快速切换类型/参数时旧响应后到不再覆盖新数据、不再杀死构建轮询、不再产生幽灵翻红翻绿事件，休市/后台标签页不再停留错误状态。
+- 其余：Dashboard 指数分时不再被裁掉约 39%（Sparkline viewBox 随尺寸）；北交所个股从榜单点开能正确拉到行情（market=2 映射与 920xxx 前缀修正）；大盘日历空数据不再被永久缓存（重试可用）；AI 解读弹窗关闭即中止轮询（此前最长空转 20 分钟）；量能图与资金日历口径/正负号展示修正。
+
+### CLI / CI / 打包
+
+- `warehouse sync` 全部失败退出码改 1（对齐 ccpm）；`--period` 参数枚举校验；`--source baostock` + 非日线周期前置拦截；公式/仓库命令缺冒号参数改为干净报错（此前裸 traceback）。
+- Release 工作流现在真实计算并发布 SHA256SUMS.txt（正文"核对哈希"指引从此成立）；CI 各 job 加超时与 pip/Playwright 缓存；PyInstaller spec 构建前提补 baostock extra 并在缺包时明确报错。
+
+### 测试
+
+- 约 60 条回归测试全部"先在旧码跑出失败、再修复转绿"；两项存疑以实测定案：baostock 周/月线字段与指数 vol 单位（真实登录对账）、深市 ETF vol 单位（本机 vipdoc 与服务器双源一致，现有 ÷100 换算正确）。全量 1820 通过，ruff / ruff format / mypy 严格模式 / `vue-tsc` / 前端 node --test 23 条全绿。
+
 ## [1.32.5] — 2026-09-06
 
 **回撤持续统计修复：不再恒为 1**——单标的回测「绩效指标 → 风险 → 回撤持续」此前无论什么股票都显示 1，本版修复计算错误，并把三处实现的口径统一为指标文档承诺的「最长水下期」：从净值峰值跌落到重新创新高的最长天数（末日仍未修复则计到最后一天），即"最长一次套牢了多久"。

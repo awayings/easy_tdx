@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import datetime as _dt
+import logging
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -176,6 +179,131 @@ def test_promote_provisional(wh):
     assert len(wh.query("SH", "600519")) == 3  # 转正后可见
 
 
+def test_promote_provisional_scoped_to_market_code_and_before(wh):
+    """scoped 转正：只转正指定标的且 datetime <= before 的 provisional 行。"""
+
+    def _one(d: str) -> pd.DataFrame:
+        return pd.DataFrame(
+            {
+                "datetime": pd.date_range(d, periods=1),
+                "open": 10.0,
+                "high": 10.1,
+                "low": 9.9,
+                "close": 10.0,
+                "vol": 100.0,
+                "amount": 1000.0,
+            }
+        )
+
+    wh.upsert_bars("SH", "600519", _one("2024-01-05"), status="provisional")
+    wh.upsert_bars("SH", "600519", _one("2024-06-01"), status="provisional")
+    wh.upsert_bars("SZ", "000001", _one("2024-01-05"), status="provisional")
+
+    n = wh.promote_provisional(market="SH", code="600519", before=pd.Timestamp("2024-03-01"))
+    assert n == 1
+    out = wh.query("SH", "600519")  # 默认查询只含 completed
+    assert len(out) == 1
+    assert pd.Timestamp(out["datetime"].iloc[0]) == pd.Timestamp("2024-01-05")
+    all_rows = wh.query("SH", "600519", include_provisional=True)
+    assert len(all_rows) == 2  # 2024-06-01 行超出 before，保持 provisional
+
+
+def _fake_clock(
+    store_mod,  # noqa: ANN001 — monkeypatch 目标模块（未用）
+    *,
+    shanghai: tuple[int, int, int, int],
+    local: tuple[int, int, int, int],
+):
+    """伪造 store 模块时钟：now(tz)=沪时区正确墙钟；now()=本地误判墙钟。
+
+    模拟「UTC 主机」：沪市已 18:00（当日 bar 应为 completed），本地 naive
+    时钟却还是 10:00（旧实现会误标 provisional）。
+    """
+
+    class _FixedDT(_dt.datetime):
+        @classmethod
+        def now(cls, tz=None):  # type: ignore[override]
+            if tz is not None:
+                y, m, d, hh = shanghai
+                return _dt.datetime(y, m, d, hh, 0, tzinfo=tz)
+            y, m, d, hh = local
+            return _dt.datetime(y, m, d, hh, 0)
+
+    return _FixedDT
+
+
+def test_provisional_uses_shanghai_clock_not_local(wh, monkeypatch):
+    """provisional 判定按沪市墙钟：沪市 18:00（收盘后）当日 bar 必须 completed。
+
+    回归：旧实现用系统本地 now()——UTC 主机上沪市收盘时本地才 10:00，
+    当日 bar 被误标 provisional，默认查询隐藏当天数据。
+    """
+    import easy_tdx.warehouse.store as store_mod
+
+    monkeypatch.setattr(
+        store_mod,
+        "datetime",
+        _fake_clock(store_mod, shanghai=(2026, 9, 7, 18), local=(2026, 9, 7, 10)),
+    )
+
+    dates = pd.date_range(
+        pd.Timestamp("2026-09-07") - pd.Timedelta(days=10), periods=11, freq="D"
+    ).tolist()  # 2026-08-28 .. 2026-09-07（末根 = 沪市「当日」）
+    df = pd.DataFrame(
+        {
+            "datetime": dates,
+            "open": 10.0,
+            "high": 10.1,
+            "low": 9.9,
+            "close": 10.0,
+            "vol": 100.0,
+            "amount": 1000.0,
+        }
+    )
+    wh.upsert_bars("SH", "600519", df)
+    # 沪市已收盘：全部 11 根都应为 completed（旧实现：当日根 provisional）
+    assert len(wh.query("SH", "600519")) == 11
+
+
+def test_promote_provisional_uses_shanghai_date(wh, monkeypatch):
+    """无参转正的「今日」边界按沪市日期：沪市已过 0 点即转正昨日临时行。"""
+    import easy_tdx.warehouse.store as store_mod
+
+    monkeypatch.setattr(
+        store_mod,
+        "datetime",
+        _fake_clock(store_mod, shanghai=(2026, 9, 8, 0), local=(2026, 9, 7, 16)),
+    )
+
+    old = pd.DataFrame(
+        {
+            "datetime": pd.date_range("2026-09-07", periods=1),
+            "open": 10.0,
+            "high": 10.1,
+            "low": 9.9,
+            "close": 10.0,
+            "vol": 100.0,
+            "amount": 1000.0,
+        }
+    )
+    wh.upsert_bars("SH", "600519", old, status="provisional")
+    # 沪市日期已是 9/8 → 9/7 的临时行应转正（旧实现按本地 9/7 → n=0）
+    assert wh.promote_provisional() == 1
+    assert len(wh.query("SH", "600519")) == 1
+
+
+def test_open_conflict_clear_error(tmp_path, monkeypatch):
+    """仓库文件被其他进程占用：给可操作的中文错误而非裸 duckdb 异常。"""
+    import duckdb as duckdb_mod
+
+    def _raise(*args, **kwargs):  # type: ignore[no-untyped-def]
+        raise duckdb_mod.IOException("Could not set lock on file")
+
+    monkeypatch.setattr(duckdb_mod, "connect", _raise)
+    with pytest.raises(RuntimeError, match="占用"):
+        KlineWarehouse(tmp_path / "lock.duckdb")
+
+
 # ── 健康自检 ─────────────────────────────────────────────────────────────────
 
 
@@ -287,6 +415,115 @@ def test_sync_progress_callback(tmp_path):
 
         WarehouseSyncer(client, warehouse).sync(["SH:600519", "SZ:000001"], progress=progress)
         assert seen == [(1, 2, "SH:600519"), (2, 2, "SZ:000001")]
+    finally:
+        warehouse.close()
+
+
+class _ScriptedClient:
+    """按调用序返回预置 DataFrame 的假客户端（末帧可重复）。"""
+
+    def __init__(self, frames: list[pd.DataFrame]) -> None:
+        self._frames = frames
+        self.calls: list[int] = []
+
+    def get_stock_kline(self, market, code, period="DAILY", start=0, count=800, adjust="NONE"):
+        self.calls.append(count)
+        idx = min(len(self.calls) - 1, len(self._frames) - 1)
+        return self._frames[idx].copy()
+
+
+def test_sync_refetch_full_when_tail_gap(tmp_path, caplog):
+    """增量尾部覆盖不到上次同步点（首 bar 晚于 existing_last）→ 全量重拉补缺。
+
+    回归：旧实现固定只拉 tail_bars 根——超过 15 个交易日未同步的标的，
+    中间日期永不补齐且无任何告警。
+    """
+    warehouse = KlineWarehouse(tmp_path / "gap.duckdb")
+    try:
+        source_full = _bars(130)  # 2024-01-01 起 130 个工作日
+        initial = source_full.iloc[:100]  # 首同步窗口（末根 idx99）
+        stale_tail = source_full.iloc[115:]  # 增量窗口：首根 idx115 > idx99 → 有缺口
+        client = _ScriptedClient([initial, stale_tail, source_full])
+        syncer = WarehouseSyncer(client, warehouse, max_bars=800, tail_bars=15)
+
+        with caplog.at_level(logging.WARNING, logger="easy_tdx.warehouse.sync"):
+            syncer.sync(["SH:600519"])
+            syncer.sync(["SH:600519"])
+
+        assert client.calls == [800, 15, 800]  # 第二次 sync 触发了全量重拉
+        rows = warehouse.query("SH", "600519")
+        assert len(rows) == 130  # 无缺口
+        bridge = pd.Timestamp(source_full["datetime"].iloc[100])
+        dts = pd.to_datetime(rows["datetime"])
+        assert (dts == bridge).any()  # 缺口桥接 bar 已补上
+        assert "缺口" in caplog.text
+    finally:
+        warehouse.close()
+
+
+def test_sync_failure_keeps_provisional(tmp_path):
+    """拉取失败：不转正 provisional，盘中临时值不会被洗成 completed。"""
+    warehouse = KlineWarehouse(tmp_path / "keep.duckdb")
+    try:
+        old = pd.DataFrame(
+            {
+                "datetime": pd.date_range("2024-01-01", periods=3),
+                "open": 10.0,
+                "high": 10.1,
+                "low": 9.9,
+                "close": 10.0,
+                "vol": 100.0,
+                "amount": 1000.0,
+            }
+        )
+        warehouse.upsert_bars("SH", "600519", old, status="provisional")
+
+        class _BadClient:
+            def get_stock_kline(self, *a, **kw):
+                raise ConnectionError("断网")
+
+        s = WarehouseSyncer(_BadClient(), warehouse).sync(["SH:600519"])
+        assert s["failed"] == 1
+        # 仍为 provisional：默认查询不可见（旧实现 sync 前盲转正 → 可见）
+        assert len(warehouse.query("SH", "600519")) == 0
+        assert len(warehouse.query("SH", "600519", include_provisional=True)) == 3
+    finally:
+        warehouse.close()
+
+
+def test_sync_promotes_only_up_to_fetched_max(tmp_path):
+    """转正上界 = 本次成功拉到的最大 datetime：未覆盖到的行保持 provisional。"""
+    warehouse = KlineWarehouse(tmp_path / "bound.duckdb")
+    try:
+
+        def _one(d: str) -> pd.DataFrame:
+            return pd.DataFrame(
+                {
+                    "datetime": pd.date_range(d, periods=1),
+                    "open": 10.0,
+                    "high": 10.1,
+                    "low": 9.9,
+                    "close": 10.0,
+                    "vol": 100.0,
+                    "amount": 1000.0,
+                }
+            )
+
+        warehouse.upsert_bars("SH", "600519", _one("2024-01-05"), status="provisional")
+        warehouse.upsert_bars("SH", "600519", _one("2024-06-01"), status="provisional")
+
+        fetched = _bars(11, start="2024-01-10")  # 最大 datetime 2024-01-24
+        client = _ScriptedClient([fetched])
+        WarehouseSyncer(client, warehouse, tail_bars=15).sync(["SH:600519"])
+
+        completed = warehouse.query("SH", "600519")
+        # 01-05 行 <= 拉取上界 → 已转正；06-01 行超出上界 → 保持 provisional
+        assert len(completed) == 12
+        all_rows = warehouse.query("SH", "600519", include_provisional=True)
+        assert len(all_rows) == 13
+        stale = all_rows[all_rows["status"] == "provisional"]
+        assert len(stale) == 1
+        assert pd.Timestamp(stale["datetime"].iloc[0]) == pd.Timestamp("2024-06-01")
     finally:
         warehouse.close()
 

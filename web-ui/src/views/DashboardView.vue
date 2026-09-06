@@ -265,10 +265,11 @@ function distHeight(count: number): string {
 }
 
 function distColor(i: number): string {
-  // 桶 1..20 对应 -10..+9：前 10 绿（跌），后 10 红（涨）；两端按方向
+  // 桶 1..20 对应 -10..+9：1..10 绿（跌），11（0 轴）中性灰，12..20 红（涨）；两端按方向
   if (i === 0) return 'var(--down)'
   if (i === BUCKETS.length - 1) return 'var(--up)'
-  return i <= 10 ? 'var(--down)' : 'var(--up)'
+  if (i === 11) return 'var(--text-dim)'
+  return i < 11 ? 'var(--down)' : 'var(--up)'
 }
 
 // ── 板块热度 + 冰冷（一次拉 120 个，前端切热/冷两端） ───────────────────────
@@ -454,7 +455,8 @@ const boardDialog = ref<{ code: string; name: string } | null>(null)
 
 function openDialog(code: string, name: string, marketHint?: string) {
   if (!code) return
-  const mkt = marketHint ?? (/^(6|9|5)/.test(code) ? 'SH' : /^(4|8|92|43)/.test(code) ? 'BJ' : 'SZ')
+  // 先判北交所再判沪市：920xxx（北交所新段）以 9 开头，若先匹配 9 会被误判 SH
+  const mkt = marketHint ?? (/^(4|8|92|43)/.test(code) ? 'BJ' : /^[659]/.test(code) ? 'SH' : 'SZ')
   dialog.value = { market: mkt, code, name }
 }
 

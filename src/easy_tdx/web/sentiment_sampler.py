@@ -19,7 +19,7 @@ import logging
 from datetime import datetime
 from typing import Any
 
-from easy_tdx.realtime.session import is_trading_time
+from easy_tdx.realtime.session import SHANGHAI_TZ, is_trading_time
 from easy_tdx.web.sentiment_store import SentimentStore, get_sentiment_store
 
 logger = logging.getLogger(__name__)
@@ -81,7 +81,9 @@ class SentimentSampler:
         if df is None or df.empty:
             raise RuntimeError("get_market_stat 返回空数据")
         row = df.iloc[0]
-        now = datetime.now()
+        # (date, minute) 键按沪市时区取"现在"：与 is_trading_time 的时段判断
+        # 同一参照系，主机时区非 UTC+8（海外服务器）时不会整体错位
+        now = datetime.now(SHANGHAI_TZ)
         self._store.insert(
             {
                 "date": now.year * 10000 + now.month * 100 + now.day,
@@ -141,7 +143,7 @@ class FundFlowSampler:
         logger.info("FundFlowSampler 启动（间隔 %ss，交易日 14:45 后每日一条）", self._interval)
         while True:
             try:
-                now = datetime.now()
+                now = datetime.now(SHANGHAI_TZ)
                 if is_trading_time(now) and (now.hour * 100 + now.minute) >= 1445:
                     await self._sample_once()
             except asyncio.CancelledError:
@@ -153,7 +155,7 @@ class FundFlowSampler:
     async def _sample_once(self) -> None:
         from easy_tdx.mac.enums import BoardType
 
-        today = int(datetime.now().strftime("%Y%m%d"))
+        today = int(datetime.now(SHANGHAI_TZ).strftime("%Y%m%d"))
         if self._store.latest_fund_date() == today:
             return  # 当日已采样
         df = await self._client.get_board_ranking(

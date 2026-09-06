@@ -230,7 +230,8 @@ async function loadVolume() {
       fetchBars('SH', '000001', 'MIN_5', start),
       fetchBars('SZ', '399001', 'MIN_5', start),
     ])
-    // 按日期聚合两市场 5 分钟 amount（元）
+    // 按日期聚合上证指数+深证成指的 5 分钟 amount（元；成指成分口径，
+    // 非深市全市场——仅用于与自身近 5 日同期均值做相对比较）
     const byDate = new Map<string, Map<string, number>>()
     for (const b of [...sh, ...sz]) {
       const d = b.datetime.slice(0, 10)
@@ -343,7 +344,7 @@ async function buildDigest(): Promise<string> {
     )
   }
   if (volRatio.value !== null) {
-    lines.push(`量能：当日两市累计成交较近 5 日同期均值 ${fmtPctSigned(volRatio.value)}。`)
+    lines.push(`量能：沪深指数（上证指数+深证成指）当日成交额较近 5 日同期均值 ${fmtPctSigned(volRatio.value)}。`)
   }
   try {
     const eco = await fetchLimitUpEcology()
@@ -471,8 +472,9 @@ onBeforeUnmount(() => {
       <!-- 量能仪表盘 -->
       <div class="section">
         <div class="sec-title">
-          量能 · 两市累计成交额（最近交易日{{ volDate ? ` ${volDate.slice(5)}` : '' }} vs 近 5 日同期均值
+          量能 · 沪深指数成交额（上证指数 + 深证成指 MIN_5 合计，最近交易日{{ volDate ? ` ${volDate.slice(5)}` : '' }} vs 近 5 日同期均值
           <span v-if="volRatio !== null" :class="volRatio > 0 ? 'up' : 'down'">{{ fmtPctSigned(volRatio) }}</span>）
+          <span class="dim">· 非全市场口径，全市场总成交见顶部「今日总成交」</span>
         </div>
         <div class="card chart-card">
           <div ref="volEl" class="chart"></div>
@@ -486,7 +488,10 @@ onBeforeUnmount(() => {
           <div v-for="d in fundDays" :key="d.date" class="fund-row">
             <span class="mono dim fund-date">{{ String(d.date).slice(4, 6) }}-{{ String(d.date).slice(6, 8) }}</span>
             <span v-for="b in d.boards" :key="b.code" class="fund-chip mono">
-              {{ b.name }} <span class="up">+{{ (b.main_net / 1e8).toFixed(1) }}亿</span>
+              {{ b.name }}
+              <span :class="b.main_net >= 0 ? 'up' : 'down'">
+                {{ b.main_net >= 0 ? '+' : '-' }}{{ (Math.abs(b.main_net) / 1e8).toFixed(1) }}亿
+              </span>
             </span>
           </div>
           <div v-if="fundDays.length === 0" class="empty-hint dim">

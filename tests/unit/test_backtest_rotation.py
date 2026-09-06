@@ -157,3 +157,93 @@ def test_momentum_score_helper():
     score = momentum_score(10)(df)
     assert score > 0
     assert momentum_score(10)(_stock(5)) == 0.0  # 数据不足 → 0
+
+
+# ── 回归：停牌/初始调仓/历史不足（审查修复） ─────────────────────────────────
+
+
+def _bar_frame(dates: pd.DatetimeIndex, prices: list[float]) -> pd.DataFrame:
+    closes = np.asarray(prices, dtype=float)
+    return pd.DataFrame(
+        {
+            "datetime": dates[: len(closes)],
+            "open": closes * 0.999,
+            "high": closes * 1.01,
+            "low": closes * 0.98,
+            "close": closes,
+            "vol": 1e6,
+        }
+    )
+
+
+def test_rotation_suspension_defers_fill_to_resume_open():
+    """停牌日挂单顺延：成交日=复牌日、成交价=复牌开盘（旧码在停牌日按停牌前价格成交）。"""
+    dates = pd.date_range("2024-01-01", periods=12, freq="D")
+    a = _bar_frame(dates, [10 + 0.05 * i for i in range(12)])
+    # B：01-01..01-07 有 bar（01-07 收盘崩盘跌出排名），01-08 停牌（下标 7 无 bar），
+    # 01-09 复牌开盘 -30%（下标 8 = 4.2）
+    b_prices = [10, 10.1, 10.2, 10.3, 10.4, 10.5, 6.0, 4.9, 4.2, 4.3, 4.3, 4.3]
+    b = pd.DataFrame(
+        [
+            {
+                "datetime": dates[i],
+                "open": p * 0.999,
+                "high": p * 1.01,
+                "low": p * 0.98,
+                "close": p,
+                "vol": 1e6,
+            }
+            for i, p in enumerate(b_prices)
+            if i != 7  # 01-08 停牌，无 bar
+        ]
+    )
+
+    engine = RotationEngine(
+        {"SH:600001": a, "SZ:000002": b},
+        momentum_score(2),
+        slots=1,
+        refresh="daily",
+        keep_rank=1,
+    )
+    res = engine.run()
+
+    sells_b = [t for t in res.trades if t["symbol"] == "SZ:000002" and t["direction"] == "SELL"]
+    assert len(sells_b) == 1
+    sell = sells_b[0]
+    assert sell["datetime"] == "2024-01-09"  # 旧码记 2024-01-08（停牌日）
+    assert sell["price"] == pytest.approx(4.2 * 0.999)  # 旧码记 6.0 * 0.999（停牌前开盘）
+    # 复牌前净值按最后已知收盘估值，不应把持仓价值清零
+    eq_by_date = {r["datetime"]: r for r in res.equity_curve}
+    assert eq_by_date["2024-01-08"]["position_value"] > 0
+
+
+def test_rotation_day0_counts_as_first_rebalance():
+    """day0 即为首个调仓日（排名只用 ≤day0 数据，次日开盘执行），不再人为空仓一天。"""
+    pool = _pool({f"SH:60000{i}": 0.002 for i in range(5)}, n=40)
+    res = RotationEngine(pool, momentum_score(5), slots=3, refresh="weekly").run()
+    # 旧码首个调仓日是下一 ISO 周 2024-01-08
+    assert res.rebalance_dates[0] == "2024-01-01"
+    # next_open 语义：任何成交不早于第二个交易日（day0 信号次日执行）
+    if res.trades:
+        assert min(t["datetime"] for t in res.trades) > res.rebalance_dates[0]
+
+
+def test_rotation_new_listing_not_bought_on_zero_score():
+    """历史不足（<5 根）从买入候选剔除：次新股 0 分不得排在负动量标的之前被买入。"""
+    n = 60
+    dates = pd.date_range("2024-01-01", periods=n, freq="B")
+    declining = 100.0 * np.cumprod(np.full(n, 1.0 - 0.005))
+    a = _bar_frame(dates, list(declining))  # 长历史持续阴跌，动量为负
+    b = _bar_frame(dates, [10.0, 10.0, 10.0])  # 末段才上市，全程 idx<5
+
+    res = RotationEngine(
+        {"SH:600001": a, "SZ:000002": b},
+        momentum_score(5),
+        slots=1,
+        refresh="daily",
+    ).run()
+
+    buys_b = [t for t in res.trades if t["symbol"] == "SZ:000002" and t["direction"] == "BUY"]
+    assert buys_b == []  # 旧码 B 以 0 分登顶被买入
+    # A 作为唯一有效候选被正常买入
+    assert any(t["symbol"] == "SH:600001" and t["direction"] == "BUY" for t in res.trades)

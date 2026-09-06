@@ -61,7 +61,8 @@ class MultiStrategyResult:
         total_performance: 组合整体绩效（资金加权收益率 + 策略数 + 总资金）。
         individual_results: 每个策略槽位的独立回测结果，key 形如 "{label}@{symbol}"。
         equity_allocation: 每个槽位的资金分配比例（均分时各 1/N）。
-        combined_equity: 组合整体净值曲线（各槽位按日期并集 ffill 对齐后求和），
+        combined_equity: 组合整体净值曲线（各槽位按日期并集 ffill 对齐后求和，
+            晚起步槽位的前导缺口按首个净值=初始资金回填），
             列: datetime / total / drawdown / drawdown_pct。
     """
 
@@ -200,7 +201,8 @@ class MultiStrategyEngine:
         算法与 ``PortfolioBacktestEngine._build_combined_equity`` 一致：
         各策略回测日期范围可能不同（取数差异、停牌），取 datetime 并集，
         每个策略的 total 列 forward-fill 对齐到并集后求和得组合总净值，
-        再算回撤。
+        再算回撤。前导缺口（晚起步槽位）按其首个净值（=初始资金）回填
+        （bfill），保证合并曲线首值等于总投入资金。
         """
         del allocations  # 资金分配不参与曲线形状（各策略独立 full cash 回测，
         # 合并的是 normalized 的净值贡献；保持签名与 Portfolio 版一致便于对照）
@@ -224,8 +226,15 @@ class MultiStrategyEngine:
         if not series_list:
             return empty
 
+        # 外连接对齐（并集日期）：各槽位在缺失日期 forward-fill（持有不动）；
+        # 前导缺口（晚起步槽位）用每列首个有效值回填（bfill）——资金在组合
+        # 起点即已分配，建仓前按初始资金趴账，与 PortfolioBacktestEngine 及
+        # 组合 Walk-Forward 的口径一致。此前前导缺口填 0：合并曲线首值会小于
+        # 总投入资金，total_return 被系统性虚增。
+        # 退化兜底：整列全 NaN（理论不可达——无数据的槽位不会进入 series_list）
+        # 显式落 0，避免 sum 传播 NaN。
         aligned = pd.concat(series_list, axis=1).sort_index()
-        aligned = aligned.ffill().fillna(0)
+        aligned = aligned.ffill().bfill().fillna(0.0)
         total = aligned.sum(axis=1)
 
         # 回撤：drawdown 为绝对回撤额（峰值-当前，正值），drawdown_pct 为相对当时

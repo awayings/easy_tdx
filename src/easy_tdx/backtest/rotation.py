@@ -225,16 +225,24 @@ class RotationEngine:
 
             # 1. 推进各标的指针到 ≤ d 的最新一根
             bar_today: dict[str, pd.Series] = {}
+            traded_today: set[str] = set()
             for sym, df in self._dfs.items():
                 dts = self._dt_index(sym)
                 while pointers[sym] + 1 < len(dts) and dts[pointers[sym] + 1] <= d:
                     pointers[sym] += 1
                 if pointers[sym] >= 0:
                     bar_today[sym] = df.iloc[pointers[sym]]
+                    # 当日真实有 bar 才可成交；停牌标的只有旧 bar（估值用）
+                    if dts[pointers[sym]] == d:
+                        traded_today.add(sym)
 
-            # 2. 次开执行昨日信号（用当日开盘价）
+            # 2. 次开执行挂单（用当日开盘价）。停牌标的当日不可成交，挂单顺延、
+            #    复牌开盘成交（真实挂单语义）；第 4 步排队按 symbol+方向去重，
+            #    不会与后续新信号重复排队。
+            still_pending: list[tuple[str, str, str]] = []
             for sym, direction, reason in pending:
-                if sym not in bar_today:
+                if sym not in traded_today:
+                    still_pending.append((sym, direction, reason))
                     continue
                 price = float(bar_today[sym]["open"])
                 if not math.isfinite(price) or price <= 0:
@@ -268,7 +276,7 @@ class RotationEngine:
                             day_i, d_str, sym, "BUY", shares, price, fee, 0.0, reason=reason
                         )
                     )
-            pending = []
+            pending = still_pending
 
             # 3. 止盈止损检查（收盘口径，次日执行）
             for sym in list(positions):
@@ -281,7 +289,8 @@ class RotationEngine:
                 elif self._take_profit is not None and close >= cost * (1 + self._take_profit):
                     pending.append((sym, "SELL", "take_profit"))
 
-            # 4. 调仓判定
+            # 4. 调仓判定（day0 即可产生初始调仓信号，次日开盘执行；排名只用
+            #    截至 day0 收盘的数据，无未来泄漏）
             key = (
                 (d.isocalendar()[0], d.isocalendar()[1])
                 if self._refresh == "weekly"
@@ -289,7 +298,7 @@ class RotationEngine:
             )
             is_rebalance = key != prev_key
             prev_key = key
-            if is_rebalance and day_i >= 1:
+            if is_rebalance:
                 rebalances.append(d_str)
                 ranked = self._rank_all(pointers, d)
                 top_keep = [s for s, _ in ranked[: self._keep_rank]]
@@ -355,12 +364,16 @@ class RotationEngine:
         return pd.DatetimeIndex(self._dfs[sym]["_ts"])
 
     def _rank_all(self, pointers: dict[str, int], d: Any) -> list[tuple[str, float]]:
-        """对全部标的按截至 d 的前缀数据打分并降序排名。"""
+        """对全部标的按截至 d 的前缀数据打分并降序排名。
+
+        历史不足（< 5 根，如次新股）打不出有效分，直接从排名（买入候选）中
+        剔除而非按 0 分参与排序——0 分会排在负动量标的之前导致误买。持仓
+        标的买入时即已满足 ≥5 根且指针只进不退，不受影响。
+        """
         scored: list[tuple[str, float]] = []
         for sym, df in self._dfs.items():
             idx = pointers[sym]
             if idx < 5:
-                scored.append((sym, 0.0))
                 continue
             start = max(0, idx - self._max_history)
             prefix = df.iloc[start : idx + 1].drop(columns=["_ts"], errors="ignore")

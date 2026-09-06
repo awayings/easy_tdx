@@ -23,6 +23,17 @@ def formula() -> None:
     """通达信公式：计算 / 选股 / 回测（命名布尔输出即信号）。"""
 
 
+def _parse_symbol(sym: str) -> tuple[str, str]:
+    """解析 ``市场:代码``；格式不对抛 click.BadParameter（而非裸 ValueError）。"""
+    market, sep, code = sym.strip().partition(":")
+    if not sep or not market.strip() or not code.strip() or ":" in code:
+        raise click.BadParameter(
+            f"标的格式应为 市场:代码（如 SH:600519），收到: {sym!r}",
+            param_hint="--symbols",
+        )
+    return market.strip().upper(), code.strip()
+
+
 def _load_formula(text: str | None, file: str | None) -> str:
     from easy_tdx.formula import compile_formula
 
@@ -130,12 +141,13 @@ def formula_screen(
         ]
     else:
         symbol_list = [s.strip() for s in symbols.split(",") if s.strip()]
+    # 前置校验全部标的格式（缺冒号等在发请求前就报错，而非循环中途裸崩）
+    symbol_pairs = [_parse_symbol(s) for s in symbol_list]
 
     compiled = compile_formula(source)
     hits: list[dict[str, Any]] = []
     errors: list[dict[str, str]] = []
-    for sym in symbol_list:
-        market, code = sym.split(":", 1)
+    for sym, (market, code) in zip(symbol_list, symbol_pairs, strict=True):
         try:
             df = _fetch(market, code, count, adjust)
             if df is None or len(df) == 0:
