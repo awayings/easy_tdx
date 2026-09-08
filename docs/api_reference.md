@@ -1,10 +1,11 @@
 # easy_tdx API 参考文档
 
-> 版本: 1.16.2 | 运行时依赖: pandas / tzdata / click | 需要网络连接通达信行情服务器
+> 本文档为**方法速查参考**；上手教程见 [python-api.md](./python-api.md)，数据模型与枚举字段见 [field_mapping.md](./field_mapping.md)，Web 服务端点见 [web-api.md](./web-api.md)。
+>
+> 文档不写死版本号，对应版本以 [CHANGELOG.md](../CHANGELOG.md) 与 pyproject.toml 为准。
 
 ## 目录
 
-- [快速开始](#快速开始)
 - [客户端](#客户端)
   - [TdxClient（同步）](#tdxclient同步)
   - [AsyncTdxClient（异步）](#asynctdxclient异步)
@@ -18,29 +19,10 @@
 - [资金流向](#资金流向)
 - [文件下载](#文件下载)
 - [市场统计](#市场统计)
-- [数据模型](#数据模型)
-- [枚举](#枚举)
 - [异常](#异常)
 - [涨跌停价计算](#涨跌停价计算)
-
----
-
-## 快速开始
-
-```python
-from easy_tdx import TdxClient, Market, KlineCategory
-
-# 自动选择最优服务器
-with TdxClient.from_best_host() as c:
-    # 沪市证券总数
-    count = c.get_security_count(Market.SH)
-
-    # 浦发银行日K线
-    bars = c.get_security_bars(Market.SH, "600000", KlineCategory.DAY, 0, 10)
-
-    # 实时行情
-    quotes = c.get_security_quotes([(Market.SH, "600000"), (Market.SZ, "000001")])
-```
+- [全局常量](#全局常量)
+- [完整 API 列表（MAC 协议客户端）](#完整-api-列表mac-协议客户端)
 
 ---
 
@@ -396,193 +378,6 @@ c.get_market_stat() -> MarketStat
 
 ---
 
-## 数据模型
-
-### SecurityInfo
-
-证券列表条目。
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| market | `Market` | 市场代码 |
-| code | `str` | 证券代码 |
-| name | `str` | 证券名称 |
-| volunit | `int` | 成交量单位（手 = volunit 股） |
-| decimal_point | `int` | 价格小数位数 |
-| pre_close | `float` | 昨收价 |
-| industry_tdx | `str` | 通达信行业代码（扩展字段） |
-| industry_sw | `str` | 申万行业代码（扩展字段） |
-
-### SecurityQuote
-
-实时五档行情。
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| market | `Market` | 市场代码 |
-| code | `str` | 证券代码 |
-| price | `float` | 现价 |
-| pre_close | `float` | 昨收 |
-| open | `float` | 今开 |
-| high | `float` | 最高 |
-| low | `float` | 最低 |
-| vol | `float` | 总成交量（手） |
-| amount | `float` | 成交额（元） |
-| bid1~bid5 | `float` | 买一到买五价 |
-| bid_vol1~bid_vol5 | `float` | 买一到买五量 |
-| ask1~ask5 | `float` | 卖一到卖五价 |
-| ask_vol1~ask_vol5 | `float` | 卖一到卖五量 |
-| s_vol | `float` | 内盘（主动卖） |
-| b_vol | `float` | 外盘（主动买） |
-| rise_speed | `float` | 涨速 |
-| server_time | `str` | 服务器时间 |
-
-### SecurityBar
-
-K 线数据。
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| open | `float` | 开盘价 |
-| close | `float` | 收盘价 |
-| high | `float` | 最高价 |
-| low | `float` | 最低价 |
-| vol | `float` | 成交量（股） |
-| amount | `float` | 成交额（元） |
-| year | `int` | 年 |
-| month | `int` | 月 |
-| day | `int` | 日 |
-| hour | `int` | 时 |
-| minute | `int` | 分 |
-| datetime_str | `str` | 属性，格式化时间字符串 |
-
-### MinuteBar
-
-分时数据。
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| price | `float` | 价格 |
-| vol | `int` | 成交量 |
-
-### TransactionRecord
-
-逐笔成交。
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| hour | `int` | 时 |
-| minute | `int` | 分 |
-| price | `float` | 成交价 |
-| vol | `int` | 成交量 |
-| buyorsell | `int` | 方向（0=买, 1=卖, 2=中性, 8=集合竞价） |
-
-### XdxrRecord
-
-除权除息记录。
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| market | `Market` | 市场 |
-| code | `str` | 代码 |
-| year/month/day | `int` | 日期 |
-| category | `int` | 事件类型（见 XDXR_CATEGORY_NAMES） |
-| fenhong | `float \| None` | 每股分红（元） |
-| peigujia | `float \| None` | 配股价 |
-| songzhuangu | `float \| None` | 每股送转股比例 |
-| peigu | `float \| None` | 每股配股比例 |
-
-### FinanceInfo
-
-最新财务数据。包含股本结构（流通股本、总股本、国家股等）、资产负债（总资产、净资产等）、利润指标（主营收入、净利润等）和每股指标。字段名使用拼音，完整列表见源码 `models/finance.py`。
-
-### CompanyInfoCategory
-
-公司信息文件目录。
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| name | `str` | 目录名 |
-| filename | `str` | 文件名 |
-| start | `int` | 起始偏移 |
-| length | `int` | 内容长度 |
-
-### TdxBlock
-
-板块信息。
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| name | `str` | 板块名称 |
-| category | `int` | 分类（0=行业, 1=地域, 2=概念, 3=风格） |
-| count | `int` | 成分股数量 |
-| codes | `list[str]` | 成分股代码列表 |
-
-### MarketStat
-
-市场统计。
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| up_count | `int` | 上涨家数 |
-| down_count | `int` | 下跌家数 |
-| neutral_count | `int` | 平盘家数 |
-| suspended_count | `int` | 停牌估算 |
-| total_count | `int` | 总计 |
-| total_amount | `float` | 总成交额 |
-| total_volume | `float` | 总成交量 |
-| total_market_cap | `float` | 总市值（元），来自 880001 收盘价 |
-| limit_up_count | `int` | 涨停家数，来自 880006 close |
-| limit_down_count | `int` | 跌停家数，来自 880006 open |
-
-### FundFlow
-
-资金流向。
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| super_in / super_out | `float` | 超大单流入/流出 |
-| large_in / large_out | `float` | 大单流入/流出 |
-| medium_in / medium_out | `float` | 中单流入/流出 |
-| small_in / small_out | `float` | 小单流入/流出 |
-| main_net_inflow | `float` | 属性：主力净流入（超大+大） |
-| total_net_inflow | `float` | 属性：全单净流入 |
-
-### HistoricalFundFlow
-
-历史日线资金流向。字段同 FundFlow，额外包含 `year`/`month`/`day` 日期字段。
-
----
-
-## 枚举
-
-### Market
-
-| 值 | 名称 | 说明 |
-|----|------|------|
-| 0 | SZ | 深圳 |
-| 1 | SH | 上海 |
-| 2 | BJ | 北京 |
-
-### KlineCategory
-
-| 值 | 名称 | 说明 |
-|----|------|------|
-| 0 | MIN_5 | 5 分钟 |
-| 1 | MIN_15 | 15 分钟 |
-| 2 | MIN_30 | 30 分钟 |
-| 3 | MIN_60 | 60 分钟 |
-| 4 | DAY | 日线 |
-| 5 | WEEK | 周线 |
-| 6 | MONTH | 月线 |
-| 7 | MIN_1 | 1 分钟 |
-| 8 | MIN_3 | 3 分钟（内部用） |
-| 9 | YEAR | 年线 |
-| 10 | SEASON | 季线 |
-| 11 | YEAR_ALT | 年线（备用） |
-
----
-
 ## 异常
 
 所有异常继承自 `TdxError`。
@@ -640,65 +435,44 @@ compute_price_limits(market, code, name, pre_close, listed_days=None)
 | `KNOWN_EX_HOSTS` | `list[str]` | 扩展行情服务器列表 |
 | `XDXR_CATEGORY_NAMES` | `dict[int, str]` | 除权除息事件类型映射 |
 
----
+## 完整 API 列表（MAC 协议客户端）
 
-## WebSocket 实时行情（serve /ws/realtime/*）
+### MacClient / AsyncMacClient
 
-`easy-tdx serve` 后可建立 WebSocket 连接（v1.28 起联动 `RealtimeDataFeed`，此前
-该端点不推送数据）：
+| 方法 | 说明 |
+|------|------|
+| `get_stock_quotes(stocks, fields)` | 批量实时报价 |
+| `get_stock_quotes_list(category, ...)` | 市场分类排序报价 |
+| `get_stock_kline(market, code, period, ...)` | K 线（支持复权） |
+| `get_stock_kline_with_indicators(market, code, indicators, ...)` | K 线 + 技术指标 |
+| `get_tick_chart(market, code, date)` | 单日分时图 |
+| `get_tick_charts(market, code, days)` | 多日分时图 |
+| `get_chart_sampling(market, code)` | 分时缩略采样 |
+| `get_transactions(market, code, ...)` | 逐笔成交 |
+| `get_symbol_info(market, code)` | 个股特征快照 |
+| `get_board_list(board_type, ..., sort_column)` | 板块列表（sort_value 列=排序键指标值） |
+| `get_board_members(board_symbol, ...)` | 板块成分股报价 |
+| `get_board_summary(board_symbol, ...)` | 板块汇总（成交额、主力净流入、涨跌家数） |
+| `get_board_ranking(board_type, top_n, sort_by, ...)` | 板块涨跌幅排行榜（行业/概念排行） |
+| `get_board_change_ranking(board_type, target_date, days, ...)` | 板块 N 日涨跌幅排行 |
+| `get_belong_board(market, code)` | 个股所属板块 |
+| `get_capital_flow(market, code)` | 资金流向 |
+| `get_auction(market, code)` | 集合竞价 |
+| `get_unusual(market, ...)` | 市场异动 |
+| `get_server_info()` | 服务器交易时段 |
+| `get_kline_offset(offset, count)` | K 线偏移信息 |
+| `get_goods_list(market, ...)` | 扩展市场商品列表 |
 
-```
-ws://127.0.0.1:8000/api/v1/ws/realtime/{symbol}     # symbol 如 SZ000001 / SH600519
-```
+### MacExClient / AsyncMacExClient
 
-### 服务端推送帧（JSON）
+| 方法 | 说明 |
+|------|------|
+| `goods_count(market)` | 商品总数 |
+| `goods_list(market, start, count)` | 商品列表 |
+| `goods_quotes(stocks, fields)` | 批量报价 |
+| `goods_quotes_list(market, ...)` | 市场分类报价列表 |
+| `goods_kline(market, code, period, ...)` | K 线（支持复权） |
+| `goods_tick_chart(market, code, ...)` | 分时图 |
+| `goods_chart_sampling(market, code)` | 分时缩略采样 |
+| `goods_transaction(market, code, ...)` | 逐笔成交 |
 
-| type | 触发 | 字段 |
-|------|------|------|
-| `tick` | 轮询到标的的最新快照（价格/量变化才推，约 `interval` 秒一拍） | `symbol`、`market`、`code`、`price`、`volume`、`ts`（epoch 秒）、`open`、`high`、`low`、`pre_close`、`amount`、`name` |
-| `ping` | 连续 30s 未收到客户端消息的心跳 | —（客户端忽略即可，无须回包） |
-| `status` | 客户端 subscribe/unsubscribe 的确认 | `msg`（如 `subscribed SH600000`） |
-| `error` | 非法 JSON / 未知 action / 超出订阅上限 | `msg` |
-
-### 客户端控制消息（JSON 文本帧）
-
-```json
-{"action": "subscribe", "symbol": "SH600000"}
-{"action": "unsubscribe", "symbol": "SH600000"}
-```
-
-### 行为约定
-
-- **连接即订阅** path 上的 symbol；断开自动退订全部标的。
-- **按需轮询**：订阅集合为空时服务端不产生任何行情请求；去重后标的总数上限
-  80（`get_stock_quotes` 协议约束）。
-- **交易时段**：默认 A 股时段外只睡不拉（无 tick 帧，心跳照发）；mock 模式
-  （`EASY_TDX_E2E_MOCK=1`）不受限制。
-- **背压**：消费过慢时丢最旧快照保最新，不积压。
-- 环境变量：`EASY_TDX_WS_INTERVAL`（轮询间隔秒数，默认 3.0）。
-
-### 前端接入方式（自动重连 + 心跳容忍）
-
-```typescript
-function connectRealtime(symbol: string, onTick: (f: TickFrame) => void) {
-  let retry = 0
-  let ws: WebSocket | null = null
-  const open = () => {
-    ws = new WebSocket(`ws://${location.host}/api/v1/ws/realtime/${symbol}`)
-    ws.onmessage = (e) => {
-      const frame = JSON.parse(e.data)
-      if (frame.type === 'tick') { retry = 0; onTick(frame) }  // ping/status 忽略
-    }
-    ws.onclose = () => {
-      retry += 1
-      setTimeout(open, Math.min(1000 * 2 ** (retry - 1), 30_000))  // 指数退避
-    }
-  }
-  open()
-  return () => ws?.close()
-}
-```
-
-> 说明：看板/自选页的实时刷新已由 SSE `/stream/quotes`（全量快照、单连接共享）
-> 承担；WS 通道定位是**按需订阅单标的 tick 事件**（后续实时策略信号的接入点），
-> 两条链路按场景选用，不要求同时连接。手动冒烟见 `scripts/ws_smoke.py`。
