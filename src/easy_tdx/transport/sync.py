@@ -7,7 +7,7 @@ from types import TracebackType
 from typing import TYPE_CHECKING, TypeVar
 
 from ..codec.frame import HEADER_SIZE, decompress_body, parse_header
-from ..commands.setup import SETUP_COMMANDS
+from ..commands.setup import build_handshake_command
 from ..config import (
     get_best_host,
     get_calc_hosts,
@@ -49,8 +49,8 @@ def ping_host(
     sock.settimeout(timeout)
     try:
         sock.connect((host, port))
-        # 发送第一条握手命令并等待响应作为可用性验证
-        sock.sendall(SETUP_COMMANDS[0])
+        # 发送握手命令并等待响应作为可用性验证（新式单条握手，随机 msg_id）
+        sock.sendall(build_handshake_command())
         hdr_buf = _recv_exact_sock(sock, HEADER_SIZE)
         hdr = parse_header(hdr_buf)
         if hdr.zipsize > 0:
@@ -140,6 +140,7 @@ class TdxConnection:
         self.port = port if port is not None else get_port()
         self.timeout = timeout if timeout is not None else get_timeout()
         self._sock: socket.socket | None = None
+        self._handshake_cmd: bytes = b""  # connect 时生成，心跳复用
         self._lock = threading.Lock()
         self._heartbeat_interval: float = 0  # 0 = disabled
         self._stop_event: threading.Event | None = None
@@ -258,7 +259,7 @@ class TdxConnection:
                     self._sock = None
                     return
                 try:
-                    self._sock.sendall(SETUP_COMMANDS[0])
+                    self._sock.sendall(self._handshake_cmd)
                     hdr_buf = _recv_exact_sock(self._sock, HEADER_SIZE)
                     hdr = parse_header(hdr_buf)
                     if hdr.zipsize > 0:
@@ -276,19 +277,26 @@ class TdxConnection:
     # ------------------------------------------------------------------ #
 
     def _send_setup(self) -> None:
-        """按序发送三条握手命令并丢弃响应。"""
+        """发送一条新式握手命令并丢弃响应。
+
+        2026-09 起主站拒绝旧三条握手（pytdx 固定 msg_id）建立的连接：握手
+        有响应但后续 K 线/快照一律返回空包。新式握手 = 单条 0x000d 命令、
+        payload 0x01、随机 msg_id（见 commands/setup.py 模块注释）。
+        """
         assert self._sock is not None
-        for cmd_bytes in SETUP_COMMANDS:
-            self._sock.sendall(cmd_bytes)
-            # 读取并丢弃握手响应
-            try:
-                hdr_buf = self._recv_exact(HEADER_SIZE)
-                hdr = parse_header(hdr_buf)
-                if hdr.zipsize > 0:
-                    self._recv_exact(hdr.zipsize)
-            except OSError:
-                # 部分服务器的握手无响应，忽略错误
-                pass
+        # 每连接生成一次握手字节：随机 msg_id 是本连接"新式客户端"的标记，
+        # 心跳复用它（与旧行为对称——旧代码心跳重发同一条固定 setup 命令）。
+        self._handshake_cmd = build_handshake_command()
+        self._sock.sendall(self._handshake_cmd)
+        # 读取并丢弃握手响应
+        try:
+            hdr_buf = self._recv_exact(HEADER_SIZE)
+            hdr = parse_header(hdr_buf)
+            if hdr.zipsize > 0:
+                self._recv_exact(hdr.zipsize)
+        except OSError:
+            # 部分服务器的握手无响应，忽略错误
+            pass
 
     def _recv_exact(self, n: int) -> bytes:
         """循环 recv 直到读满 n 字节。"""

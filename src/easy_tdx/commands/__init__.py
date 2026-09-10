@@ -1,10 +1,7 @@
 from .base import BaseCommand
-from .setup import SETUP_CMD1, SETUP_CMD2, SETUP_CMD3, SETUP_COMMANDS
+from .setup import build_handshake_command
 
 __all__ = [
     "BaseCommand",
-    "SETUP_CMD1",
-    "SETUP_CMD2",
-    "SETUP_CMD3",
-    "SETUP_COMMANDS",
+    "build_handshake_command",
 ]
