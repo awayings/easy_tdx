@@ -5,7 +5,7 @@ from types import TracebackType
 from typing import TYPE_CHECKING, TypeVar
 
 from ..codec.frame import HEADER_SIZE, decompress_body, parse_header
-from ..commands.setup import SETUP_COMMANDS
+from ..commands.setup import build_handshake_command
 from ..config import get_best_host, get_port, get_timeout
 from ..exceptions import TdxConnectionError
 
@@ -122,19 +122,23 @@ class AsyncTdxConnection:
     # ------------------------------------------------------------------ #
 
     async def _send_setup(self) -> None:
-        """按序发送三条握手命令并丢弃响应。"""
+        """发送一条新式握手命令并丢弃响应。
+
+        2026-09 起主站拒绝旧三条握手（pytdx 固定 msg_id）建立的连接：握手
+        有响应但后续 K 线/快照一律返回空包。新式握手 = 单条 0x000d 命令、
+        payload 0x01、随机 msg_id（见 commands/setup.py 模块注释）。
+        """
         assert self._writer is not None
         assert self._reader is not None
-        for cmd_bytes in SETUP_COMMANDS:
-            self._writer.write(cmd_bytes)
-            await asyncio.wait_for(self._writer.drain(), timeout=self.timeout)
-            try:
-                hdr_buf = await self._recv_exact(HEADER_SIZE)
-                hdr = parse_header(hdr_buf)
-                if hdr.zipsize > 0:
-                    await self._recv_exact(hdr.zipsize)
-            except (OSError, asyncio.TimeoutError, asyncio.IncompleteReadError):
-                pass
+        self._writer.write(build_handshake_command())
+        await asyncio.wait_for(self._writer.drain(), timeout=self.timeout)
+        try:
+            hdr_buf = await self._recv_exact(HEADER_SIZE)
+            hdr = parse_header(hdr_buf)
+            if hdr.zipsize > 0:
+                await self._recv_exact(hdr.zipsize)
+        except (OSError, asyncio.TimeoutError, asyncio.IncompleteReadError):
+            pass
 
     async def _recv_exact(self, n: int) -> bytes:
         """读满 n 字节。"""

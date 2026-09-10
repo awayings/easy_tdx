@@ -1,15 +1,31 @@
-"""握手命令原始字节（从 pytdx/parser/setup_commands.py 移植，已在真实服务器验证）。
+"""新式握手命令（2026-09 起主站强制要求，勿回退旧三条命令）。
 
-连接建立后必须按序发送三条握手命令，每条均需读取并丢弃响应。
+历史（2026-09-10 与 eltdx 逐字节比对 + 对照实测定案）：
+
+2026-09 起行情主站拒绝"旧版客户端握手"建立的连接：旧握手 = pytdx 三条
+固定 msg_id 的 0x000d 命令（0x1893/0x1894/0x1899，payload 01/02/签名串）。
+握手本身有响应，但连接上所有 K 线请求一律返回 2 字节空包（0x0320，声称
+800 条）、880xxx 统计指数快照返回空——服务器不报错，只是不给数据
+（部分主站 setup2 响应明示"客户端与行情主站不匹配"）。web /market/stat
+500、/bars/index 空列表均源于此。
+
+对照实验（三组）：
+  1. 旧三条命令 + 随机 msg_id → 仍被拒（拒绝标记是三条命令序列本身）；
+  2. 新式单条握手 + 固定 msg_id 的业务请求 → 全部正常；
+  3. 新式握手连接上连续 8 个固定 msg_id 业务请求 → 全部正常。
+
+新式握手 = 单条 0x000d 命令、payload 0x01、msg_id 随机（每连接新生成）。
+业务请求格式（28 字节 K 线 / 0x053e 快照等）无需任何改动。
 """
 
-from typing import Final
+import random
+import struct
 
-# 从 pytdx 源码原文复制，去除空格
-SETUP_CMD1: Final[bytes] = bytes.fromhex("0c0218930001030003000d0001")
-SETUP_CMD2: Final[bytes] = bytes.fromhex("0c0218940001030003000d0002")
-SETUP_CMD3: Final[bytes] = bytes.fromhex(
-    "0c031899000120002000db0fd5d0c9ccd6a4a8af0000008fc22540130000d500c9ccbdf0d7ea00000002"
-)
 
-SETUP_COMMANDS: Final[tuple[bytes, ...]] = (SETUP_CMD1, SETUP_CMD2, SETUP_CMD3)
+def build_handshake_command() -> bytes:
+    """生成一条新式握手命令（msg_id 每次调用随机生成）。
+
+    旧三条 setup 常量（SETUP_CMD1/2/3）已删除；发送握手一律走本函数。
+    """
+    msg_id = random.randint(1, 0xFFFFFFFE)
+    return struct.pack("<HIHHH", 0x010C, msg_id, 0x0003, 0x0003, 0x000D) + b"\x01"

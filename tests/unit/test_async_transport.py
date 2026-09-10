@@ -8,7 +8,7 @@ import time
 
 from easy_tdx import AsyncTdxClient, Market
 from easy_tdx.commands.security_count import GetSecurityCountCmd
-from easy_tdx.commands.setup import SETUP_COMMANDS
+from easy_tdx.commands.setup import build_handshake_command
 from easy_tdx.exceptions import TdxConnectionError
 
 
@@ -16,15 +16,24 @@ def _pack_frame(body: bytes) -> bytes:
     return struct.pack("<IIIHH", 0, 0, 0, len(body), len(body)) + body
 
 
+_HANDSHAKE_LEN = len(build_handshake_command())
+
+
+async def _read_and_ack_handshake(
+    reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+) -> None:
+    """假服务器：读取一条握手命令并回一个空响应帧（新式握手，2026-09）。"""
+    await reader.readexactly(_HANDSHAKE_LEN)
+    writer.write(_pack_frame(b""))
+    await writer.drain()
+
+
 def test_async_client_serializes_concurrent_calls() -> None:
     request_len = len(GetSecurityCountCmd(Market.SH).build_request())
 
     async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         try:
-            for setup_cmd in SETUP_COMMANDS:
-                await reader.readexactly(len(setup_cmd))
-                writer.write(_pack_frame(b""))
-                await writer.drain()
+            await _read_and_ack_handshake(reader, writer)
 
             await reader.readexactly(request_len)
             writer.write(_pack_frame(struct.pack("<H", 5)))
@@ -68,10 +77,7 @@ def test_async_client_auto_reconnect() -> None:
         connection_ids.append(len(connection_ids) + 1)
         connection_id = connection_ids[-1]
         try:
-            for setup_cmd in SETUP_COMMANDS:
-                await reader.readexactly(len(setup_cmd))
-                writer.write(_pack_frame(b""))
-                await writer.drain()
+            await _read_and_ack_handshake(reader, writer)
 
             await reader.readexactly(request_len)
             writer.write(_pack_frame(struct.pack("<H", 10 + connection_id)))
@@ -104,10 +110,7 @@ def test_async_client_request_timeout() -> None:
 
     async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         try:
-            for setup_cmd in SETUP_COMMANDS:
-                await reader.readexactly(len(setup_cmd))
-                writer.write(_pack_frame(b""))
-                await writer.drain()
+            await _read_and_ack_handshake(reader, writer)
 
             await reader.readexactly(request_len)
             await asyncio.sleep(1.0)
