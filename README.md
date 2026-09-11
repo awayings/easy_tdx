@@ -2,8 +2,8 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![PyPI](https://img.shields.io/pypi/v/easy-tdx.svg)](https://pypi.org/project/easy-tdx/)
-[![GitHub Repo stars](https://img.shields.io/github/stars/awayings/easy-tdx?style=social)](https://github.com/awayings/easy-tdx)
-[![GitHub last commit](https://img.shields.io/github/last-commit/handsomejustin/easy-tdx)](https://github.com/awayings/easy-tdx)
+[![GitHub Repo stars](https://img.shields.io/github/stars/awayings/easy_tdx?style=social)](https://github.com/awayings/easy_tdx)
+[![GitHub last commit](https://img.shields.io/github/last-commit/awayings/easy_tdx)](https://github.com/awayings/easy_tdx)
 [![Checked with mypy](http://www.mypy-lang.org/static/mypy_badge.svg)](http://www.mypy-lang.org/)
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/handsomejustin/easy_tdx)
 
