@@ -11,6 +11,7 @@ import {
   fetchQuotes,
   fetchSymbolName,
   fetchWatchlist,
+  fetchWatchlistReturns,
   formatError,
   removeWatchItem,
 } from '../api'
@@ -20,9 +21,17 @@ import Sparkline from '../components/Sparkline.vue'
 import { dirClass, fmt2, fmtAmount, fmtPctSigned, fmtVol } from '../format'
 import { detectMarket } from '../market'
 import { useQuoteStore } from '../stores/quotes'
-import type { WatchItem } from '../types'
+import type { WatchItem, WatchReturnItem } from '../types'
 
 const quoteStore = useQuoteStore()
+
+// 近 N 交易日涨跌幅（交易日偏移口径，见后端 /watchlist/returns）：列名与窗口一一对应，
+// 窗口本身由后端 returns.DEFAULT_WINDOWS 固定，这里只负责标签与取值顺序。
+const WINDOWS: ReadonlyArray<{ days: number; label: string }> = [
+  { days: 3, label: '近3日' },
+  { days: 5, label: '近1周' },
+  { days: 10, label: '近2周' },
+]
 
 /** 板块指数（881/885/880 开头）走板块弹窗，其余走个股弹窗。 */
 function isBoardCode(code: string): boolean {
@@ -43,6 +52,7 @@ async function loadList() {
     const resp = await fetchWatchlist()
     items.value = resp.items
     loadSparks()
+    loadReturns()
     restFallback()
     fillMissingNames()
   } catch (e) {
@@ -93,6 +103,50 @@ function pct(item: WatchItem): number | null {
   const qq = q(item)
   if (!qq?.price || !qq.pre_close) return null
   return (qq.price / qq.pre_close - 1) * 100
+}
+
+// ── 近 N 交易日涨跌幅（锚点收盘价来自后端，涨跌幅在这里用实时价现算） ──────────
+
+const returns = ref(new Map<string, WatchReturnItem>())
+
+/** 拉一次锚点（后端按天缓存，盘中/重复刷新不重复请求行情）。 */
+async function loadReturns() {
+  if (items.value.length === 0) {
+    returns.value = new Map()
+    return
+  }
+  try {
+    const resp = await fetchWatchlistReturns()
+    returns.value = new Map(Object.entries(resp.items))
+  } catch {
+    // 单只失败/整体失败都不影响其余列，静默（与 loadSparks 同语义）
+  }
+}
+
+function retItem(item: WatchItem): WatchReturnItem | undefined {
+  return returns.value.get(item.symbol)
+}
+
+/** 锚点日期（悬停提示用）：近N日涨跌幅的基准 bar 实际日期。 */
+function anchorDate(item: WatchItem, days: number): string {
+  const a = retItem(item)?.anchors?.find((x) => x.days === days)
+  return a?.date ? `锚点 ${a.date}` : '锚点不可用'
+}
+
+/** 近 N 交易日涨跌幅：优先 SSE 实时价，无报价时用后端 last_close 兜底。 */
+function pctVs(item: WatchItem, days: number): number | null {
+  const r = retItem(item)
+  const anchor = r?.anchors?.find((a) => a.days === days)?.close
+  if (anchor == null || !(anchor > 0)) return null
+  const price = q(item)?.price ?? r?.last_close
+  if (price == null || !Number.isFinite(price) || price <= 0) return null
+  return (price / anchor - 1) * 100
+}
+
+/** 长期停牌（最后一根 bar 不在 T）：标灰，避免误读成当日行情。 */
+function isStale(item: WatchItem): boolean {
+  const r = retItem(item)
+  return !!r && !r.error && (r.stale_days ?? 0) > 0
 }
 
 // ── 迷你分时 ────────────────────────────────────────────────────────────────
@@ -168,6 +222,7 @@ async function remove(item: WatchItem) {
     await removeWatchItem(item.market, item.code)
     items.value = items.value.filter((i) => i.symbol !== item.symbol)
     sparks.value.delete(item.symbol)
+    returns.value.delete(item.symbol)
   } catch (e) {
     listError.value = formatError(e)
   }
@@ -211,6 +266,7 @@ const emptyHint = computed(() =>
             <th>名称</th>
             <th>现价</th>
             <th>涨跌幅</th>
+            <th v-for="w in WINDOWS" :key="w.days">{{ w.label }}</th>
             <th>涨跌额</th>
             <th>成交量</th>
             <th>成交额</th>
@@ -224,7 +280,7 @@ const emptyHint = computed(() =>
         </thead>
         <tbody>
           <tr v-if="emptyHint" class="empty-row">
-            <td colspan="12">{{ emptyHint }}</td>
+            <td colspan="15">{{ emptyHint }}</td>
           </tr>
           <tr v-for="item in items" :key="item.symbol" class="data-row" @click="openItem(item)">
             <td>
@@ -233,6 +289,14 @@ const emptyHint = computed(() =>
             </td>
             <td class="big" :class="dirClass(pct(item))">{{ fmt2(q(item)?.price) }}</td>
             <td :class="dirClass(pct(item))">{{ fmtPctSigned(pct(item)) }}</td>
+            <td
+              v-for="w in WINDOWS"
+              :key="w.days"
+              :class="[dirClass(pctVs(item, w.days)), { dim: isStale(item) }]"
+              :title="anchorDate(item, w.days)"
+            >
+              {{ fmtPctSigned(pctVs(item, w.days)) }}
+            </td>
             <td :class="dirClass(pct(item))">
               {{ q(item)?.price && q(item)?.pre_close ? fmt2(q(item)!.price! - q(item)!.pre_close!) : '-' }}
             </td>

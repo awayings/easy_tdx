@@ -555,6 +555,28 @@ export interface WatchlistResponse {
   count: number
 }
 
+/** 单个交易日窗口的锚点（close 为 null = 数据不足，前端显示 '-'）。 */
+export interface WatchReturnAnchor {
+  days: number
+  close: number | null
+  date: string | null
+}
+
+/** 一只自选的锚点结果；取数失败时只有 error（后端不下发 null 字段）。 */
+export interface WatchReturnItem {
+  last_close?: number
+  last_date?: string
+  stale_days?: number
+  anchors?: WatchReturnAnchor[]
+  error?: string
+}
+
+/** GET /api/v1/watchlist/returns：anchor 收盘价 + T（涨跌幅由前端用实时价现算）。 */
+export interface WatchlistReturnsResponse {
+  trade_date: string | null
+  items: Record<string, WatchReturnItem>
+}
+
 // ── 行情终端：板块列表（GET /api/v1/board-mac/list，MAC 协议，防御式取列） ────
 
 /** 板块行（MAC 协议字段随版本浮动，全部可选，渲染端容错）。 */
