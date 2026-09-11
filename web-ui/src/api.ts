@@ -113,9 +113,11 @@ export async function fetchBars(
 
     allBars = allBars.concat(pageBars)
 
-    // 若已覆盖到 startDate（本页最早一根 ≤ startDate），停止翻页
+    // 若已覆盖到 startDate（本页最早一根 ≤ startDate），停止翻页。
+    // 页内升序：首根才是本页最早（此前取末根=最新根，判断恒假，每个带
+    // startDate 的请求都多翻一页）
     if (startDate && pageBars.length > 0) {
-      const oldest = pageBars[pageBars.length - 1].datetime.slice(0, 10)
+      const oldest = pageBars[0].datetime.slice(0, 10)
       if (oldest <= startDate) break
     }
     // 不足 800 根说明已到数据起点

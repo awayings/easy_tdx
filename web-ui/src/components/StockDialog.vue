@@ -106,7 +106,11 @@ watch(minuteDays, loadMinute)
 async function loadDaily() {
   dailyError.value = ''
   try {
-    let bars = await fetchBars(props.market, props.code, 'DAY', undefined, undefined)
+    // 日K只展示最近 250 根：取近 2 年（/bars 单页 800 根即可覆盖，避免全历史
+    // 分页 5+ 页 + 深层 QFQ 负价重算）；长期停牌取不到再退回全历史。
+    const since = new Date(Date.now() - 2 * 365 * 86400_000).toISOString().slice(0, 10)
+    let bars = await fetchBars(props.market, props.code, 'DAY', since, undefined)
+    if (bars.length === 0) bars = await fetchBars(props.market, props.code, 'DAY', undefined, undefined)
     // 指数（或 /bars 空数据的服务器）回退指数接口
     if (bars.length === 0) bars = await fetchIndexBars(props.market, props.code, 250)
     if (bars.length === 0) throw new Error('无日K数据（可能为新股或代码有误）')
