@@ -620,7 +620,7 @@ def test_watchlist_returns_calendar_not_refetched_outside_session(monkeypatch, t
 
 def test_calendar_stale_rules():
     """日历重取规则：含今天 / 时段外一律不重取；缺今天则按间隔重取。"""
-    from easy_tdx.web.routers.watchlist import _CalendarEntry, _calendar_stale
+    from easy_tdx.web.routers.watchlist import _calendar_stale, _CalendarEntry
 
     today = date(2026, 9, 11)
     no_today = [d for d in _CAL if d < today]  # "今天"的 bar 始终没生成
