@@ -363,9 +363,10 @@ def test_watchlist_returns_ok(monkeypatch, tmp_path):
     assert item["anchors"][0]["close"] == pytest.approx(10.0 + _IDX_D3)
     assert item["anchors"][1]["close"] == pytest.approx(10.0 + _IDX_D5)
     assert item["anchors"][2]["close"] == pytest.approx(10.0 + _IDX_D10)
-    # /bars 同款语义：MAC + QFQ + count=800
+    # /bars 同款语义：MAC + QFQ + 按窗口推导的 count（单页请求，不取 800 根）
     assert {k["adjust"] for k in mac.kwargs} == {Adjust.QFQ}
-    assert {k["count"] for k in mac.kwargs} == {800}
+    assert {k["count"] for k in mac.kwargs} == {mod._BAR_COUNT}
+    assert mod._BAR_COUNT < 700  # MAC 单页上限内，1 次请求
     assert set(mac.calls) == {"000001", "600519", "002594"}
 
 

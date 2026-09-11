@@ -157,7 +157,7 @@ curl -X POST "http://localhost:8000/api/v1/watchlist" \
 
 # 自选「近 3 日 / 近 1 周 / 近 2 周」涨跌幅锚点（窗口固定为 3,5,10；交易日偏移口径）
 # T = 上证指数日线（交易日历）中 <= 今天的最后一天；D_n = T 往前 n 个交易日；
-# 锚点 = 个股日线（/bars 同款 QFQ，count=800）中 date <= D_n 的最后一根 bar。
+# 锚点 = 个股日线（/bars 同款 QFQ，count 按窗口推导 ≈20 根，MAC 单页请求）中 date <= D_n 的最后一根 bar。
 # 只回锚点收盘价：涨跌幅由前端用实时价现算（盘中随 SSE 跳动，无需轮询本接口）。
 # 个股日线与日历都走进程内缓存（当日不变、次日失效），同一天重复刷新零行情请求。
 curl "http://localhost:8000/api/v1/watchlist/returns"

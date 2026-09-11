@@ -30,7 +30,12 @@ from easy_tdx.models.enums import KlineCategory, Market
 from easy_tdx.realtime.session import SHANGHAI_TZ, is_trading_time
 from easy_tdx.web.convert import market_from_str, market_value_from_str
 from easy_tdx.web.deps import get_client, get_mac_client_optional
-from easy_tdx.web.returns import StockReturns, compute_stock_returns, resolve_trade_date
+from easy_tdx.web.returns import (
+    DEFAULT_WINDOWS,
+    StockReturns,
+    compute_stock_returns,
+    resolve_trade_date,
+)
 from easy_tdx.web.watchlist_store import WatchItem, get_watchlist_store
 
 _logger = logging.getLogger(__name__)
@@ -44,7 +49,11 @@ _CODE_PATTERN = r"^\d{6}$"
 
 _CALENDAR_MARKET = Market.SH  # 交易日历 = 上证指数（个股停牌会缺日期，不能当日历）
 _CALENDAR_CODE = "000001"
-_BAR_COUNT = 800  # 日线一次覆盖 3 年+（与 /bars 默认同值），锚点与 last_close 同一次请求
+# 取数根数 = 最大窗口 + 缓冲。数学上 max(DEFAULT_WINDOWS)+1=11 根就够（D_10 之后最多
+# 10 个交易日，第 11 根必然 <= D_10），+10 缓冲吸收序列端部意外；20 根仍是 MAC 单页
+# （700 根/页）。实测 MAC 服务端 QFQ 复权锚与请求窗口无关（count=11 vs 800 收盘价
+# 完全一致），缩小窗口不改变锚点值，800 根的 2 页请求纯属浪费。
+_BAR_COUNT = max(DEFAULT_WINDOWS) + 10
 _CONCURRENCY = 4  # TDX 防封红线：并发 ≤ 4
 # 日历"未确认"（缺今天）时的重取间隔，详见 _calendar_stale
 _CALENDAR_RETRY_SECONDS = 60.0
@@ -294,7 +303,8 @@ async def watchlist_returns(
 
     锚定算法（详见 :mod:`easy_tdx.web.returns`）：``T`` = 上证指数日线（交易日历）
     中 ``<=`` 今天的最后一个交易日；``D_n`` = 日历中 ``T`` 往前 n 个交易日的日期；
-    锚点 = 个股日线（``/bars`` 同款 QFQ，count=800）中 ``date <= D_n`` 的最后一根 bar。
+    锚点 = 个股日线（``/bars`` 同款 QFQ，count=按窗口推导的 ``_BAR_COUNT``）中
+    ``date <= D_n`` 的最后一根 bar。
 
     容错：今日非交易日 → ``T`` 自动回退；个股锚点日停牌 → 退到最近一根并回实际
     ``date``；数据不足（次新）→ ``anchors[].close`` 为 ``null``；长期停牌 → 回
