@@ -48,6 +48,7 @@ import type {
   TaskState,
   TaskSubmitResponse,
   WatchlistResponse,
+  WatchlistReturnsResponse,
 } from './types'
 
 const BASE = '/api/v1'
@@ -701,6 +702,13 @@ export async function fetchWatchlist(): Promise<WatchlistResponse> {
   const resp = await fetch(`${BASE}/watchlist`)
   if (!resp.ok) await throwError(resp)
   return (await resp.json()) as WatchlistResponse
+}
+
+/** 近 3/5/10 交易日涨跌幅的锚点收盘价（前端用实时价现算涨跌幅，后端只给锚点）。 */
+export async function fetchWatchlistReturns(): Promise<WatchlistReturnsResponse> {
+  const resp = await fetch(`${BASE}/watchlist/returns`)
+  if (!resp.ok) await throwError(resp)
+  return (await resp.json()) as WatchlistReturnsResponse
 }
 
 /** 加入自选（幂等）。 */

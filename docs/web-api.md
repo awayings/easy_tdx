@@ -155,6 +155,25 @@ curl "http://localhost:8000/api/v1/watchlist"
 curl -X POST "http://localhost:8000/api/v1/watchlist" \
   -H "Content-Type: application/json" -d '{"market": "SH", "code": "600519", "name": "贵州茅台"}'
 
+# 自选「近 3 日 / 近 1 周 / 近 2 周」涨跌幅锚点（窗口固定为 3,5,10；交易日偏移口径）
+# T = 上证指数日线（交易日历）中 <= 今天的最后一天；D_n = T 往前 n 个交易日；
+# 锚点 = 个股日线（/bars 同款 QFQ，count=800）中 date <= D_n 的最后一根 bar。
+# 只回锚点收盘价：涨跌幅由前端用实时价现算（盘中随 SSE 跳动，无需轮询本接口）。
+# 个股日线与日历都走进程内缓存（当日不变、次日失效），同一天重复刷新零行情请求。
+curl "http://localhost:8000/api/v1/watchlist/returns"
+# 实测样例（2026-09-11 盘中）：
+# {"trade_date":"2026-09-11",
+#  "items":{"SH600519":{"last_close":1272.95,"last_date":"2026-09-11","stale_days":0,
+#                       "anchors":[{"days":3,"close":1309.3,"date":"2026-09-08"},
+#                                  {"days":5,"close":1330.0,"date":"2026-09-04"},
+#                                  {"days":10,"close":1297.4,"date":"2026-08-28"}]},
+#           "SZ301999":{"error":"no_data"}}}
+# 注：anchors[].close 是**锚点收盘价**（不是涨跌幅），前端 (实时价/锚点 − 1)×100 得该列。
+# 容错：今日非交易日 → T 回退；锚点日停牌 → 退到最近一根并回实际 date；数据不足
+# （次新）→ anchors[].close 为 null（前端显示 '-'）；长期停牌 → last_date +
+# stale_days；单只失败只在该 key 落 error（no_data/fetch_failed），不影响整表。
+# 无 MAC 连接时按 /bars 语义降级标准协议（不复权，除权日可能出现假跌幅，日志标注）。
+
 # ── AI 解读（模型 Key 只存本地 ~/.easy_tdx/llm.json）──
 curl "http://localhost:8000/api/v1/llm/config"                                # 当前配置 + Provider 预设
 curl -X POST "http://localhost:8000/api/v1/llm/chat/async" \
