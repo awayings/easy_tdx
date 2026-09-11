@@ -2,12 +2,12 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![PyPI](https://img.shields.io/pypi/v/easy-tdx.svg)](https://pypi.org/project/easy-tdx/)
-[![GitHub Repo stars](https://img.shields.io/github/stars/handsomejustin/easy-tdx?style=social)](https://github.com/handsomejustin/easy-tdx)
-[![GitHub last commit](https://img.shields.io/github/last-commit/handsomejustin/easy-tdx)](https://github.com/handsomejustin/easy-tdx)
+[![GitHub Repo stars](https://img.shields.io/github/stars/awayings/easy-tdx?style=social)](https://github.com/awayings/easy-tdx)
+[![GitHub last commit](https://img.shields.io/github/last-commit/handsomejustin/easy-tdx)](https://github.com/awayings/easy-tdx)
 [![Checked with mypy](http://www.mypy-lang.org/static/mypy_badge.svg)](http://www.mypy-lang.org/)
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/handsomejustin/easy_tdx)
 
-<img src="./docs/top_img.png" alt="头部宣传图" />
+<!-- <img src="./docs/top_img.png" alt="头部宣传图" /> -->
 
 ## Star History
 
@@ -18,10 +18,6 @@
    <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=handsomejustin/easy_tdx&type=timeline&legend=top-left" />
  </picture>
 </a>
-
-量化基金花百万买的毫秒级行情通道，散户连一根日线都要手动截图——这不是技术差距，这是数据霸凌。
-
-easy-tdx 要做的事很简单：**把机构的数据锁砸开，扔到每个普通人桌面。**
 
 它是一个完全免费、无需注册、无需 API Key、纯开源的 A 股量化工具箱。对通达信网络协议净室实现（不依赖通达信客户端，也能直接读写本地数据文件），一行命令即可拉取 K 线、报价、板块、资金流、分时、逐笔成交；Python API / CLI / Web API 三通道，输出 JSON 天然喂给 AI Agent。
 
